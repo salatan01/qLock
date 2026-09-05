@@ -1,0 +1,94 @@
+# --- Nix / Flake ---
+# nix build outputs (symlink to /nix/store)
+/result
+/result-*
+# direnv (from .envrc -> `use flake`)
+/.direnv/
+.direnvrc
+# lorri / nix-direnv legacy
+/shell.nix
+
+# flake.lock IS intentionally tracked for reproducibility — do not ignore.
+# Uncomment next line if you prefer to float on nixpkgs-unstable:
+# flake.lock
+
+# --- Quickshell / QML / Qt6 (see flake.nix: qtDeps + shellHook) ---
+# qmlls config is auto-generated in shellHook (flake.nix:62-64) and is
+# machine-specific (contains absolute /nix/store paths)
+.qmlls.ini
+qmlls.ini
+
+# QML compiled cache
+*.qmlc
+*.jsc
+*.qmlcache
+qmlcache/
+.cache/
+.qt/
+
+# Qt Creator / Qt Design Studio
+*.pro.user
+*.pro.user.*
+*.qbs.user
+*.qbs.user.*
+*.moc
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.qmlproject.user
+*.qmlproject.user.*
+
+# Quickshell runtime cache (if you run `quickshell -c qlock`)
+/quickshell.log
+
+# --- GStreamer (see flake.nix: gstDeps) ---
+# GStreamer plugin scanner cache written to HOME, not repo — nothing to ignore
+# here, but local registry if dumped:
+.gst-cache/
+
+# --- Build dirs ---
+/build/
+/build-*/
+out/
+dist/
+
+# --- Local / Personal config ---
+# config/config.json contains an absolute videoDirectory
+# (/home/nightkat/Videos/lockscreen) — keep it tracked as a default, but
+# uncomment the next line if you want to keep your local path private and
+# track an example instead:
+# config/config.json
+config/*.local.json
+
+# --- Secrets / Env ---
+.env
+.env.*
+!.envrc
+!.env.example
+*.pem
+*.key
+
+# --- Editor / IDE ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+\#*\#
+.\#*
+.helix/
+.zed/
+
+# --- OS ---
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.Trash-*
+
+# --- Logs / Temp ---
+*.log
+*.tmp
+*.temp
+npm-debug.log*
