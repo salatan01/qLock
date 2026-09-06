@@ -12,6 +12,7 @@ ShellRoot {
         videoDirectory: "/home/nightkat/Videos/lockscreen",
         mode: "random",
         fixedFile: "",
+        repeat: true,
         volume: 0.15
     })
 
@@ -74,6 +75,7 @@ ShellRoot {
             source: playlist.currentVideoUrl
             volume: root.config.volume
             suspended: suspendWatcher.suspended
+            loop: root.config.repeat !== false
             onEnded: playlist.next()
         }
 

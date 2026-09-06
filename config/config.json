@@ -2,5 +2,6 @@
   "videoDirectory": "/home/superkat01/Videos",
   "mode": "random",
   "fixedFile": "",
+  "repeat": true,
   "volume": 0.15
 }

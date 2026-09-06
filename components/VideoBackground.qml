@@ -9,6 +9,10 @@ Item {
     required property string source
     property real volume: 0.15
     property bool suspended: false   // set true by suspend-hook to pause safely
+    // Seamless repeat: the backend loops the decoded stream internally —
+    // no stop/reload/rebuffer, so no black flash between iterations.
+    // When false, plays once and emits ended() for playlist advance.
+    property bool loop: true
 
     signal ended()
 
@@ -19,10 +23,10 @@ Item {
             volume: root.volume
         }
         videoOutput: videoOutput
-        loops: 1
+        loops: root.loop ? MediaPlayer.Infinite : 1
 
         onMediaStatusChanged: {
-            if (mediaStatus === MediaPlayer.EndOfMedia) {
+            if (!root.loop && mediaStatus === MediaPlayer.EndOfMedia) {
                 root.ended();
             }
         }
@@ -39,7 +43,9 @@ Item {
     }
 
     onSourceChanged: {
-        if (source.length > 0) {
+        // Skip redundant reloads (e.g. fixed-mode re-signalling the same URL):
+        // a needless stop()/play() cycle is itself a visible stutter.
+        if (source.length > 0 && player.source.toString() !== source) {
             player.stop();
             player.source = source;
             if (!root.suspended) player.play();
