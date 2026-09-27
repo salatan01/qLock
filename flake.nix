@@ -1,86 +1,152 @@
 {
-  description = "qLock Development Environment (Quickshell + QtMultimedia video lockscreen)";
+  description = "qLock — video-wallpaper ext-session-lock screen for Quickshell";
+
   inputs = {
     nixpkgs.url = "github:nixos/nixpkgs/nixos-unstable";
   };
-  outputs = { nixpkgs, ... }:
-    let
-      system = "x86_64-linux";
-      pkgs = import nixpkgs { inherit system; };
 
-      # Full suite of Qt6 dependencies required for SVG, multimedia, and visual effects
-      qtDeps = with pkgs.qt6; [
-        qtdeclarative  # Includes qmlls (LSP) and QML core modules
-        qtsvg          # Rendering SVG icons/graphics
-        qtimageformats # Support for WebP and extended image formats
-        qtmultimedia   # Audio/video widget playback (QML MediaPlayer/VideoOutput)
-        qt5compat      # Additional graphical effects (e.g., Blur)
+  outputs = {
+    self,
+    nixpkgs,
+  }: let
+    systems = [
+      "x86_64-linux"
+      "aarch64-linux"
+    ];
+    forAllSystems = nixpkgs.lib.genAttrs systems;
+    pkgsFor = system: import nixpkgs {inherit system;};
+
+    version = "0.1.0";
+
+    # Ship only runtime inputs: QML + default config. Flake/nix/*.md churn
+    # must not rebuild the package.
+    qlockSrc = pkgs:
+      pkgs.lib.fileset.toSource {
+        root = ./.;
+        fileset = pkgs.lib.fileset.unions [
+          ./shell.qml
+          ./test.qml
+          ./components
+          ./config
+        ];
+      };
+
+    qtDepsFor = pkgs:
+      with pkgs.qt6; [
+        qtbase
+        qtdeclarative # QML core + qmlls
+        qtsvg
+        qtimageformats
+        qtmultimedia
+        qt5compat
+        qtwayland # WlSessionLock
       ];
 
-      # GStreamer backend for QtMultimedia. Without this, MediaPlayer either
-      # fails silently or falls back to software decode.
-      gstDeps = with pkgs.gst_all_1; [
+    gstDepsFor = pkgs:
+      with pkgs.gst_all_1; [
         gstreamer
         gst-plugins-base
         gst-plugins-good
         gst-plugins-bad
         gst-plugins-ugly
-        gst-libav        # broad codec coverage (h264/h265/etc via ffmpeg)
+        gst-libav
       ];
-    in
-    {
-      devShells.${system}.default = pkgs.mkShell {
-        packages = with pkgs; [
-          # Core shell pulled directly from nixpkgs
-          quickshell
-          # LSP & Tooling
-          qt6.qtdeclarative
-          # VA-API hardware decode verification/support
-          libva
-          libva-utils     # gives you `vainfo` to verify HW decode is active
-          # Common IPC utilities for status bar / desktop shell scripting
-          wireplumber
-          pulseaudio      # pactl / audio control
-          bluez           # bluetoothctl
-          networkmanager
-          niri            # niri msg IPC (this machine runs Niri, not Hyprland)
-          jq
-          # For the suspend-hook (PrepareForSleep) listener via Process{}
-          systemd         # busctl / dbus-monitor equivalents
-          socat
-        ] ++ qtDeps ++ gstDeps;
+  in {
+    packages = forAllSystems (system: let
+      pkgs = pkgsFor system;
+    in {
+      qlock = pkgs.callPackage ./nix/package.nix {
+        inherit version;
+        src = qlockSrc pkgs;
+      };
+      default = self.packages.${system}.qlock;
+    });
 
-        shellHook = ''
-          # 1) Allow QML XMLHttpRequest to read local files.
-          # Qt disables GET on file:// by default for security, which makes
-          # shell.qml's XHR loader for ./config/config.json silently fail and
-          # fall back to the hardcoded /home/nightkat/... object.
-          export QML_XHR_ALLOW_FILE_READ=1
+    apps = forAllSystems (system: {
+      qlock = {
+        type = "app";
+        program = "${self.packages.${system}.qlock}/bin/qlock";
+        meta.description = "Lock the session (production ext-session-lock surface)";
+      };
+      preview = {
+        type = "app";
+        program = "${self.packages.${system}.qlock}/bin/qlock-preview";
+        meta.description = "Safe preview window (no session lock)";
+      };
+      default = self.apps.${system}.qlock;
+    });
 
-          # Export QML2_IMPORT_PATH so qmlls and Qt runtime find all packages
-          export QML2_IMPORT_PATH="${pkgs.quickshell}/lib/qt-6/qml:${pkgs.lib.makeSearchPathOutput "out" "lib/qt-6/qml" qtDeps}"
+    nixosModules = {
+      qlock = import ./nix/module.nix;
+      default = self.nixosModules.qlock;
+    };
 
-          # 2) Expose Qt plugin backends to the runtime.
-          # nixpkgs' qt6.qtmultimedia ships libffmpegmediaplugin.so /
-          # libgstreamermediaplugin.so under lib/qt-6/plugins/multimedia, but
-          # mkShell doesn't run Qt's wrapper hooks that normally set
-          # QT_PLUGIN_PATH. Without this, MediaPlayer fails with
-          # "No QtMultimedia backends found / Failed to initialize QMediaPlayer".
-          export QT_PLUGIN_PATH="${pkgs.lib.makeSearchPathOutput "out" "lib/qt-6/plugins" qtDeps}:${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
+    homeManagerModules = {
+      qlock = import ./nix/hm-module.nix;
+      default = self.homeManagerModules.qlock;
+    };
+    # Alias for managers that expect `homeManagerModules` under this name.
+    homeModules = self.homeManagerModules;
 
-          # GStreamer needs its plugin path exported explicitly under Nix —
-          # it isn't discoverable via PATH the way it is on FHS distros.
-          export GST_PLUGIN_SYSTEM_PATH_1_0="${pkgs.lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" gstDeps}"
-
-          # Quickshell requires a local .qmlls.ini file to auto-populate module paths
-          if [ ! -f .qmlls.ini ]; then
-            touch .qmlls.ini
-          fi
-
-          echo "qLock dev environment active."
-          echo "qmlls location: $(which qmlls)"
-          echo "Run 'vainfo' to confirm VA-API hardware decode is available."
-        '';
+    overlays.default = final: _prev: {
+      qlock = final.callPackage ./nix/package.nix {
+        inherit version;
+        src = qlockSrc final;
       };
     };
+
+    devShells = forAllSystems (system: let
+      pkgs = pkgsFor system;
+      qtDeps = qtDepsFor pkgs;
+      gstDeps = gstDepsFor pkgs;
+    in {
+      default = pkgs.mkShell {
+        packages = with pkgs;
+          [
+            quickshell
+            qt6.qtdeclarative
+            libva
+            libva-utils
+            wireplumber
+            pulseaudio
+            bluez
+            networkmanager
+            niri
+            jq
+            alejandra
+            systemd
+            socat
+          ]
+          ++ qtDeps ++ gstDeps;
+
+        shellHook = ''
+          export QML_XHR_ALLOW_FILE_READ=1
+          export QML2_IMPORT_PATH="${pkgs.quickshell}/lib/qt-6/qml:${pkgs.lib.makeSearchPathOutput "out" "lib/qt-6/qml" qtDeps}"
+          export QT_PLUGIN_PATH="${pkgs.lib.makeSearchPathOutput "out" "lib/qt-6/plugins" qtDeps}:${pkgs.qt6.qtbase}/${pkgs.qt6.qtbase.qtPluginPrefix}"
+          export GST_PLUGIN_SYSTEM_PATH_1_0="${pkgs.lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" gstDeps}"
+
+          echo "qLock dev environment active."
+          echo "  nix run .#preview  — safe preview (no lock)"
+          echo "  nix run .#qlock    — REAL LOCK, use from a second TTY first"
+        '';
+      };
+    });
+
+    formatter = forAllSystems (system: (pkgsFor system).alejandra);
+
+    checks = forAllSystems (system: let
+      pkgs = pkgsFor system;
+    in {
+      config-json-valid = pkgs.runCommand "qlock-config-json-valid" {} ''
+        ${pkgs.lib.getExe pkgs.jq} -e . ${./config/config.json} > /dev/null
+        touch $out
+      '';
+      qml-present = pkgs.runCommand "qlock-qml-present" {} ''
+        for f in shell.qml test.qml components/PlaylistEngine.qml components/VideoBackground.qml components/AuthOverlay.qml components/SuspendWatcher.qml components/SystemVolumeWatcher.qml config/config.json; do
+          test -f ${./.}/$f || (echo "missing $f" && exit 1)
+        done
+        touch $out
+      '';
+    });
+  };
 }

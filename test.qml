@@ -9,31 +9,60 @@ ShellRoot {
     id: root
 
     property var config: ({
-        videoDirectory: "/home/nightkat/Videos/lockscreen",
+        videoDirectory: Quickshell.env("HOME") + "/qSets/qLock/",
         mode: "random",
         fixedFile: "",
         repeat: true,
-        volume: 0.15
+        volume: 20
     })
 
     Component.onCompleted: root._loadConfig()
 
+    function _configCandidates() {
+        const candidates = [];
+        const override = Quickshell.env("QLOCK_CONFIG") || "";
+        if (override.length > 0) {
+            candidates.push(override.startsWith("file://") ? override : "file://" + override);
+        }
+        const xdg = Quickshell.env("XDG_CONFIG_HOME") || "";
+        const home = Quickshell.env("HOME") || "";
+        if (xdg.length > 0) {
+            candidates.push("file://" + xdg + "/qlock/config.json");
+        } else if (home.length > 0) {
+            candidates.push("file://" + home + "/.config/qlock/config.json");
+        }
+        candidates.push("file:///etc/qlock/config.json");
+        candidates.push(Qt.resolvedUrl("./config/config.json"));
+        return candidates;
+    }
+
     function _loadConfig() {
+        root._tryConfigUrl(root._configCandidates(), 0);
+    }
+
+    function _tryConfigUrl(urls, i) {
+        if (i >= urls.length) {
+            console.warn("qLock[test]: no config.json found, using built-in defaults:", JSON.stringify(root.config));
+            return;
+        }
         const xhr = new XMLHttpRequest();
-        xhr.open("GET", Qt.resolvedUrl("./config/config.json"));
+        xhr.open("GET", urls[i]);
         xhr.onreadystatechange = () => {
-            if (xhr.readyState === XMLHttpRequest.DONE) {
-                if (xhr.status === 200) {
-                    try {
-                        const parsed = JSON.parse(xhr.responseText);
-                        root.config = parsed;
-                        console.log("qLock[test]: config loaded", JSON.stringify(parsed));
-                    } catch (e) {
-                        console.warn("qLock[test]: failed to parse config.json, using defaults:", e);
-                    }
-                } else {
-                    console.warn("qLock[test]: config.json XHR failed — status", xhr.status, "— check QML_XHR_ALLOW_FILE_READ=1; using defaults", root.config);
+            if (xhr.readyState !== XMLHttpRequest.DONE) return;
+            if (xhr.status === 200) {
+                try {
+                    const parsed = JSON.parse(xhr.responseText);
+                    root.config = Object.assign({}, root.config, parsed);
+                    console.log("qLock[test]: config loaded from", urls[i], JSON.stringify(parsed));
+                } catch (e) {
+                    console.warn("qLock[test]: failed to parse", urls[i], e, "- trying next");
+                    root._tryConfigUrl(urls, i + 1);
                 }
+            } else {
+                if (i === urls.length - 1) {
+                    console.warn("qLock[test]: config.json XHR failed — check QML_XHR_ALLOW_FILE_READ=1; using defaults", JSON.stringify(root.config));
+                }
+                root._tryConfigUrl(urls, i + 1);
             }
         };
         xhr.send();
@@ -43,13 +72,17 @@ ShellRoot {
         id: suspendWatcher
     }
 
+    SystemVolumeWatcher {
+        id: sysVol
+    }
+
     PlaylistEngine {
         id: playlist
         videoDirectory: root.config.videoDirectory
         mode: root.config.mode
         fixedFile: root.config.fixedFile
 
-        onCountChanged: console.log("qLock[test]: PlaylistEngine count", count, "dir", root.config.videoDirectory)
+        onCountChanged: console.log("qLock[test]: PlaylistEngine count", count, "dir", playlist.resolvedDirectory, "(raw:", root.config.videoDirectory + ")")
     }
 
     Connections {
@@ -74,6 +107,9 @@ ShellRoot {
             z: 0
             source: playlist.currentVideoUrl
             volume: root.config.volume
+            sinkVolume: sysVol.sinkVolume
+            sinkMuted: sysVol.sinkMuted
+            pinActive: sysVol.pinActive
             suspended: suspendWatcher.suspended
             loop: root.config.repeat !== false
             onEnded: playlist.next()

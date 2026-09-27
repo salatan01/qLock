@@ -1,7 +1,8 @@
 {
-  "videoDirectory": "/home/superkat01/Videos",
+  "videoDirectory": "~/qSets/qLock/",
   "mode": "random",
   "fixedFile": "",
   "repeat": true,
-  "volume": 0.15
+  "volume": 20,
+  "pinSink": true
 }

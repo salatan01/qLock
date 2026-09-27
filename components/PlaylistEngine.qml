@@ -2,6 +2,7 @@ pragma ComponentBehavior: Bound
 
 import QtQuick
 import Qt.labs.folderlistmodel
+import Quickshell
 
 Item {
     id: root
@@ -9,6 +10,12 @@ Item {
     required property string videoDirectory
     required property string mode        // "fixed" | "random"
     property string fixedFile: ""        // used when mode == "fixed"
+
+    // videoDirectory from config.json may contain a leading "~" (e.g. "~/qSets/qLock/").
+    // Qt/QML does NOT expand "~" — "file://~/..." resolves to nothing, so
+    // FolderListModel finds 0 files and the lock sits on a black screen.
+    // Expand it here centrally so both shell.qml and test.qml benefit.
+    readonly property string resolvedDirectory: root._expandPath(root.videoDirectory)
 
     readonly property alias currentVideoUrl: internal.currentUrl
     readonly property int count: folderModel.count
@@ -24,16 +31,45 @@ Item {
 
     FolderListModel {
         id: folderModel
-        folder: "file://" + root.videoDirectory
+        folder: "file://" + root.resolvedDirectory
         nameFilters: ["*.mp4", "*.mkv", "*.webm"]
         showDirs: false
         sortField: FolderListModel.Name
 
         onStatusChanged: {
-            if (status === FolderListModel.Ready && count > 0) {
-                root._pickInitial();
+            if (status === FolderListModel.Ready) {
+                if (count > 0) {
+                    root._pickInitial();
+                } else {
+                    console.warn("qLock: no videos found in", root.resolvedDirectory, "(raw config value:", JSON.stringify(root.videoDirectory) + ")");
+                }
             }
         }
+    }
+
+    function _expandPath(p) {
+        if (!p || p.length === 0) return p;
+        // Already a file:// URL — strip scheme, expand, caller re-adds it.
+        let path = p;
+        if (path.startsWith("file://")) path = path.slice("file://".length);
+        if (path[0] === "~") {
+            const home = Quickshell.env("HOME") || "";
+            if (path.length === 1) return home;
+            if (path[1] === "/") return home + path.slice(1);
+            // "~otheruser/..." — not supported, return as-is and warn.
+            console.warn("qLock: unsupported ~user path, using as-is:", JSON.stringify(p));
+            return path;
+        }
+        // $HOME / ${HOME} prefix expansion for convenience.
+        if (path.startsWith("$HOME/")) {
+            const home = Quickshell.env("HOME") || "";
+            return home + path.slice("$HOME".length);
+        }
+        if (path.startsWith("${HOME}/")) {
+            const home = Quickshell.env("HOME") || "";
+            return home + path.slice("${HOME}".length);
+        }
+        return path;
     }
 
     function _urlAt(i) {
