@@ -3,6 +3,7 @@
   "mode": "random",
   "fixedFile": "",
   "repeat": true,
+  "playback": 2,
   "volume": 20,
   "pinSink": true
 }

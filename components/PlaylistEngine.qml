@@ -19,6 +19,12 @@ Item {
 
     readonly property alias currentVideoUrl: internal.currentUrl
     readonly property int count: folderModel.count
+    // Exposed so shells can distinguish "still scanning" (Loading) from
+    // "directory is genuinely empty" (Ready + count 0) and render the right
+    // empty-state instead of a bare black screen.
+    readonly property int loadStatus: folderModel.status
+    readonly property bool loading: folderModel.status === FolderListModel.Loading
+    readonly property bool ready: folderModel.status === FolderListModel.Ready
 
     // History for non-repeating random order
     property var _shuffleBag: []
@@ -113,16 +119,24 @@ Item {
         root._shuffleBag = bag;
     }
 
-    // Called by VideoBackground on MediaPlayer.EndOfMedia
+    // Called by VideoBackground on MediaPlayer.EndOfMedia (i.e. after
+    // effectiveLoops plays — see VideoBackground.playCount). Returns true
+    // when the URL changed (random: advanced to the next shuffle-bag entry),
+    // false when there is nothing to advance to (empty library, or fixed
+    // mode where the single video is already looping infinitely in-player).
+    //
+    // Fixed mode is deliberately a no-op: the old blank-and-restore hack
+    // ("" → same URL) never restarted playback — VideoBackground's
+    // onSourceChanged guard correctly skips same-URL reloads, so the player
+    // just sat at EndOfMedia forever. Fixed + repeat:true uses
+    // playCount=0 → Infinite and never reaches here; if it ever does (e.g.
+    // repeat:false), the shell restarts in place via VideoBackground.restart()
+    // instead of churning the URL.
     function next() {
-        if (folderModel.count === 0) return;
+        if (folderModel.count === 0) return false;
 
         if (root.mode === "fixed") {
-            // RepeatOne behavior: just re-signal the same URL so the
-            // player restarts it (see VideoBackground's onCurrentVideoUrlChanged guard).
-            internal.currentUrl = "";
-            internal.currentUrl = root._resolveFixed();
-            return;
+            return false;
         }
 
         // random, non-repeating until the bag is exhausted, then reshuffle
@@ -132,5 +146,6 @@ Item {
             root._shuffleIndex = 0;
         }
         internal.currentUrl = root._urlAt(root._shuffleBag[root._shuffleIndex]);
+        return true;
     }
 }

@@ -37,7 +37,20 @@ in {
           repeat = lib.mkOption {
             type = lib.types.bool;
             default = true;
-            description = "Seamless in-player loop. When false, advances the playlist at end-of-media.";
+            description = "Seamless in-player loop. When false, each video plays once and the playlist advances (playback is ignored).";
+          };
+          playback = lib.mkOption {
+            type = lib.types.numbers.between 0 100;
+            default = 0;
+            example = 2;
+            description = ''
+              Plays per video in random mode before advancing ("2" = 2playback:
+              same video twice, then a new random video twice, …). 0 loops the
+              current video forever (legacy repeat:true default), 1 plays once
+              then advances. Only read when repeat is true; fixed mode ignores
+              it (single video loops forever). Aliases playbackCount /
+              repeatCount / playCount are accepted from hand-written JSON.
+            '';
           };
           volume = lib.mkOption {
             type = lib.types.numbers.between 0 100;
@@ -48,10 +61,12 @@ in {
             type = lib.types.bool;
             default = true;
             description = ''
-              Hold the default sink at full gain while locked (saving and
-              restoring the user's volume/mute on unlock) so bg loudness is
-              exactly `volume`, immune to volume buttons. Disable for plain
-              sink-relative playback with cubic compensation only.
+              Anchor the default sink at its lock-time level while locked
+              (saving and restoring the user's volume/mute on unlock) so bg
+              loudness is exactly `volume`, immune to volume buttons. The sink
+              can only ever be returned to the anchor, never raised above it.
+              Disable for plain sink-relative playback with cubic compensation
+              only.
             '';
           };
         };
@@ -77,10 +92,6 @@ in {
       {
         assertion = cfg.settings.videoDirectory != "";
         message = "services.qlock.settings.videoDirectory must not be empty.";
-      }
-      {
-        assertion = cfg.settings.mode != "fixed" || cfg.settings.fixedFile != "" || true;
-        message = "services.qlock: fixed mode with empty fixedFile falls back to first video (allowed, but check intent).";
       }
     ];
 

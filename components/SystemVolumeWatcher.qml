@@ -129,7 +129,20 @@ Item {
     }
 
     function _setSink(vol, muted) {
-        if (setter.running) return;
+        // Never drop a request: wpctl is fast (<100ms) but volume-button
+        // spam or a slow daemon can overlap a previous set. The old code
+        // returned early when setter was busy, silently losing restores.
+        // Latest request wins — queue it and dispatch when the chain drains.
+        if (setter.running || muter.running) {
+            root._queuedVol = vol;
+            root._queuedMute = muted;
+            root._haveQueued = true;
+            return;
+        }
+        root._dispatchSink(vol, muted);
+    }
+
+    function _dispatchSink(vol, muted) {
         // mute intent is recorded only when the volume half is accepted,
         // so a skipped (busy) call can't leave a stale mute behind.
         root._pendingMute = muted;
@@ -138,8 +151,19 @@ Item {
         setter.running = true;
     }
 
+    function _drainQueue() {
+        if (!root._haveQueued) return;
+        if (setter.running || muter.running) return;
+        root._haveQueued = false;
+        root._dispatchSink(root._queuedVol, root._queuedMute);
+    }
+
     property bool _pendingMute: false
     property bool _havePendingMute: false
+    // Latest overwritten request waiting while setter/muter are busy.
+    property real _queuedVol: 1.0
+    property bool _queuedMute: false
+    property bool _haveQueued: false
 
     function _saveFilePath() {
         const rt = Quickshell.env("XDG_RUNTIME_DIR") || "";
@@ -179,7 +203,8 @@ Item {
     }
 
     // One-shot setter for pin/restore. Chains the mute change after the
-    // volume change lands so both apply in order.
+    // volume change lands so both apply in order, then drains any request
+    // that arrived mid-flight (latest wins).
     Process {
         id: setter
         stdout: SplitParser {
@@ -190,12 +215,15 @@ Item {
                 root._havePendingMute = false;
                 muter.command = ["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", root._pendingMute ? "1" : "0"];
                 if (!muter.running) muter.running = true;
+            } else {
+                root._drainQueue();
             }
         }
     }
 
     Process {
         id: muter
+        onExited: root._drainQueue()
     }
 
     Process {

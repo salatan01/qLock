@@ -9,76 +9,26 @@ import "./components"
 ShellRoot {
     id: root
 
-    property var config: ({
-        videoDirectory: Quickshell.env("HOME") + "/qSets/qLock/",
-        mode: "random",
-        fixedFile: "",
-        repeat: true,
-        volume: 20
-    })
-
-    Component.onCompleted: root._loadConfig()
-
-    function _configCandidates() {
-        // Priority: $QLOCK_CONFIG > $XDG_CONFIG_HOME/qlock > ~/.config/qlock
-        //   > /etc/qlock (NixOS module) > bundled ./config/config.json
-        const candidates = [];
-        const override = Quickshell.env("QLOCK_CONFIG") || "";
-        if (override.length > 0) {
-            candidates.push(override.startsWith("file://") ? override : "file://" + override);
-        }
-        const xdg = Quickshell.env("XDG_CONFIG_HOME") || "";
-        const home = Quickshell.env("HOME") || "";
-        if (xdg.length > 0) {
-            candidates.push("file://" + xdg + "/qlock/config.json");
-        } else if (home.length > 0) {
-            candidates.push("file://" + home + "/.config/qlock/config.json");
-        }
-        candidates.push("file:///etc/qlock/config.json");
-        candidates.push(Qt.resolvedUrl("./config/config.json"));
-        return candidates;
+    // Layered JSON config + playback normalization (see ConfigLoader.qml).
+    ConfigLoader {
+        id: cfg
     }
 
-    function _loadConfig() {
-        root._tryConfigUrl(root._configCandidates(), 0);
-    }
-
-    function _tryConfigUrl(urls, i) {
-        if (i >= urls.length) {
-            console.warn("qLock: no config.json found, using built-in defaults:", JSON.stringify(root.config));
-            return;
-        }
-        const xhr = new XMLHttpRequest();
-        xhr.open("GET", urls[i]);
-        xhr.onreadystatechange = () => {
-            if (xhr.readyState !== XMLHttpRequest.DONE) return;
-            if (xhr.status === 200) {
-                try {
-                    const parsed = JSON.parse(xhr.responseText);
-                    // Merge over built-in defaults so partial configs work.
-                    root.config = Object.assign({}, root.config, parsed);
-                    console.log("qLock: config loaded from", urls[i], JSON.stringify(root.config));
-                } catch (e) {
-                    console.warn("qLock: failed to parse", urls[i], e, "- trying next");
-                    root._tryConfigUrl(urls, i + 1);
-                }
-            } else {
-                if (i === urls.length - 1) {
-                    console.warn("qLock: bundled config unreachable — check QML_XHR_ALLOW_FILE_READ=1; using defaults", JSON.stringify(root.config));
-                }
-                root._tryConfigUrl(urls, i + 1);
-            }
-        };
-        xhr.send();
+    // Shared auth: ONE PamContext for all screens. WlSessionLock clones its
+    // surface per monitor; each AuthOverlay below is a dumb view onto this.
+    AuthContext {
+        id: authCtx
+        onAuthSucceeded: root._handleUnlock()
     }
 
     function _handleUnlock() {
         // Restore the pre-lock sink gain first; the EXIT trap in the `qlock`
         // wrapper is the backstop if quit ever outruns the async restore.
         // Unlock is delayed ~800ms so wpctl lands before we exit (the
-        // success fade covers the wait).
-        sysVol.restore();
-        unlockTimer.start();
+        // success fade covers the wait), then 400ms more so the unlock
+        // commits to the compositor before the process exits.
+        sysVol.restore()
+        unlockTimer.start()
     }
 
     Timer {
@@ -86,9 +36,16 @@ ShellRoot {
         interval: 800
         repeat: false
         onTriggered: {
-            lock.locked = false;
-            Qt.quit();
+            lock.locked = false
+            quitTimer.start()
         }
+    }
+
+    Timer {
+        id: quitTimer
+        interval: 400
+        repeat: false
+        onTriggered: Qt.quit()
     }
 
     SuspendWatcher {
@@ -100,14 +57,14 @@ ShellRoot {
         // Pin the sink while locked so bg loudness is exactly `volume`,
         // immune to volume buttons. `!== false` keeps pinning on for
         // legacy configs lacking the key. Preview (test.qml) never pins.
-        pinned: root.config.pinSink !== false
+        pinned: cfg.config.pinSink !== false
     }
 
     PlaylistEngine {
         id: playlist
-        videoDirectory: root.config.videoDirectory
-        mode: root.config.mode
-        fixedFile: root.config.fixedFile
+        videoDirectory: cfg.config.videoDirectory
+        mode: cfg.config.mode
+        fixedFile: cfg.config.fixedFile
     }
 
     // MAIN LOCKSHELL — video as wallpaper
@@ -119,16 +76,26 @@ ShellRoot {
             color: "black"
 
             VideoBackground {
+                id: bgVideo
                 anchors.fill: parent
                 z: 0
                 source: playlist.currentVideoUrl
-                volume: root.config.volume
+                volume: cfg.config.volume
                 sinkVolume: sysVol.sinkVolume
                 sinkMuted: sysVol.sinkMuted
                 pinActive: sysVol.pinActive
                 suspended: suspendWatcher.suspended
-                loop: root.config.repeat !== false
-                onEnded: playlist.next()
+                loop: cfg.config.repeat !== false
+                // Fixed mode advances nowhere, so it loops forever in-player
+                // (no EndOfMedia, no reload flicker). Random mode replays
+                // each video `playback` times seamlessly, then advances:
+                // playback=2 is "2playback", 3 is "3playback", 0 is forever.
+                playCount: cfg.config.mode === "fixed" ? 0 : cfg.effectivePlayCount()
+                debug: cfg.debug
+                onEnded: {
+                    if (playlist.mode === "fixed") bgVideo.restart()
+                    else playlist.next()
+                }
             }
 
             // soft vignette so HUD stays readable while video stays hero
@@ -142,9 +109,84 @@ ShellRoot {
                 }
             }
 
-            AuthOverlay {
+            // Empty-library / loading states: never leave a bare black
+            // screen without telling the user why.
+            Item {
+                anchors.fill: parent
                 z: 2
-                onAuthSucceeded: root._handleUnlock()
+                visible: playlist.ready && playlist.count === 0
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: emptyCol.implicitWidth + 36
+                    height: emptyCol.implicitHeight + 28
+                    radius: 14
+                    color: "#aa101418"
+                    border.color: "#55ffffff"
+                    Column {
+                        id: emptyCol
+                        anchors.centerIn: parent
+                        spacing: 6
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: "No videos found"
+                            color: "white"
+                            font.pixelSize: 16
+                            font.weight: Font.DemiBold
+                        }
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: "dir: " + playlist.resolvedDirectory
+                            color: "#aaffffff"
+                            font.pixelSize: 11
+                        }
+                        Text {
+                            anchors.horizontalCenter: parent.horizontalCenter
+                            text: "add *.mp4 / *.mkv / *.webm, then re-lock"
+                            color: "#88ffffff"
+                            font.pixelSize: 11
+                        }
+                    }
+                }
+            }
+            Item {
+                anchors.fill: parent
+                z: 2
+                visible: playlist.loading && playlist.count === 0
+                Rectangle {
+                    anchors.centerIn: parent
+                    width: loadingRow.implicitWidth + 36
+                    height: 44
+                    radius: 22
+                    color: "#aa101418"
+                    border.color: "#33ffffff"
+                    Row {
+                        id: loadingRow
+                        anchors.centerIn: parent
+                        spacing: 8
+                        Text { text: "◐"; color: "#8ad6ff"; font.pixelSize: 14 }
+                        Text { text: "Loading videos…"; color: "#ccffffff"; font.pixelSize: 12 }
+                    }
+                }
+            }
+
+            AuthOverlay {
+                z: 3
+                authContext: authCtx
+                // Mouse-free lock: keyboard only (any key reveals, Enter
+                // submits, Esc hides). All MouseAreas inside go dead.
+                mouseEnabled: false
+            }
+
+            // Invisible cursor: topmost, hover-enabled so its shape wins
+            // everywhere (even over the password field), accepts no buttons
+            // so nothing is clickable — clicks fall through to dead layers.
+            // The video stays perfectly clean.
+            MouseArea {
+                anchors.fill: parent
+                z: 100
+                hoverEnabled: true
+                acceptedButtons: Qt.NoButton
+                cursorShape: Qt.BlankCursor
             }
         }
     }

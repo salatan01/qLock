@@ -8,64 +8,14 @@ import "./components"
 ShellRoot {
     id: root
 
-    property var config: ({
-        videoDirectory: Quickshell.env("HOME") + "/qSets/qLock/",
-        mode: "random",
-        fixedFile: "",
-        repeat: true,
-        volume: 20
-    })
-
-    Component.onCompleted: root._loadConfig()
-
-    function _configCandidates() {
-        const candidates = [];
-        const override = Quickshell.env("QLOCK_CONFIG") || "";
-        if (override.length > 0) {
-            candidates.push(override.startsWith("file://") ? override : "file://" + override);
-        }
-        const xdg = Quickshell.env("XDG_CONFIG_HOME") || "";
-        const home = Quickshell.env("HOME") || "";
-        if (xdg.length > 0) {
-            candidates.push("file://" + xdg + "/qlock/config.json");
-        } else if (home.length > 0) {
-            candidates.push("file://" + home + "/.config/qlock/config.json");
-        }
-        candidates.push("file:///etc/qlock/config.json");
-        candidates.push(Qt.resolvedUrl("./config/config.json"));
-        return candidates;
+    ConfigLoader {
+        id: cfg
     }
 
-    function _loadConfig() {
-        root._tryConfigUrl(root._configCandidates(), 0);
-    }
-
-    function _tryConfigUrl(urls, i) {
-        if (i >= urls.length) {
-            console.warn("qLock[test]: no config.json found, using built-in defaults:", JSON.stringify(root.config));
-            return;
-        }
-        const xhr = new XMLHttpRequest();
-        xhr.open("GET", urls[i]);
-        xhr.onreadystatechange = () => {
-            if (xhr.readyState !== XMLHttpRequest.DONE) return;
-            if (xhr.status === 200) {
-                try {
-                    const parsed = JSON.parse(xhr.responseText);
-                    root.config = Object.assign({}, root.config, parsed);
-                    console.log("qLock[test]: config loaded from", urls[i], JSON.stringify(parsed));
-                } catch (e) {
-                    console.warn("qLock[test]: failed to parse", urls[i], e, "- trying next");
-                    root._tryConfigUrl(urls, i + 1);
-                }
-            } else {
-                if (i === urls.length - 1) {
-                    console.warn("qLock[test]: config.json XHR failed — check QML_XHR_ALLOW_FILE_READ=1; using defaults", JSON.stringify(root.config));
-                }
-                root._tryConfigUrl(urls, i + 1);
-            }
-        };
-        xhr.send();
+    AuthContext {
+        id: authCtx
+        // In preview, PAM success just quits so visuals can be tested safely
+        onAuthSucceeded: Qt.quit()
     }
 
     SuspendWatcher {
@@ -78,17 +28,26 @@ ShellRoot {
 
     PlaylistEngine {
         id: playlist
-        videoDirectory: root.config.videoDirectory
-        mode: root.config.mode
-        fixedFile: root.config.fixedFile
+        videoDirectory: cfg.config.videoDirectory
+        mode: cfg.config.mode
+        fixedFile: cfg.config.fixedFile
 
-        onCountChanged: console.log("qLock[test]: PlaylistEngine count", count, "dir", playlist.resolvedDirectory, "(raw:", root.config.videoDirectory + ")")
+        onCountChanged: console.log("qLock[test]: PlaylistEngine count", count, "dir", playlist.resolvedDirectory, "(raw:", cfg.config.videoDirectory + ")")
     }
 
     Connections {
         target: playlist
         function onCurrentVideoUrlChanged() {
             console.log("qLock[test]: currentVideoUrl →", playlist.currentVideoUrl, " (count", playlist.count, ")");
+        }
+    }
+
+    Connections {
+        target: cfg
+        function onConfigLoaded(from) {
+            const n = cfg.effectivePlayCount()
+            console.log("qLock[test]: playback →", n === 0 ? "Infinite" : n + "x per video",
+                "(mode", cfg.config.mode + ", repeat", cfg.config.repeat + ")")
         }
     }
 
@@ -106,13 +65,18 @@ ShellRoot {
             anchors.fill: parent
             z: 0
             source: playlist.currentVideoUrl
-            volume: root.config.volume
+            volume: cfg.config.volume
             sinkVolume: sysVol.sinkVolume
             sinkMuted: sysVol.sinkMuted
             pinActive: sysVol.pinActive
             suspended: suspendWatcher.suspended
-            loop: root.config.repeat !== false
-            onEnded: playlist.next()
+            loop: cfg.config.repeat !== false
+            playCount: cfg.config.mode === "fixed" ? 0 : cfg.effectivePlayCount()
+            debug: cfg.debug
+            onEnded: {
+                if (playlist.mode === "fixed") previewVideo.restart()
+                else playlist.next()
+            }
         }
 
         Rectangle {
@@ -125,11 +89,64 @@ ShellRoot {
             }
         }
 
+        Item {
+            anchors.fill: parent
+            z: 2
+            visible: playlist.ready && playlist.count === 0
+            Rectangle {
+                anchors.centerIn: parent
+                width: emptyCol.implicitWidth + 36
+                height: emptyCol.implicitHeight + 28
+                radius: 14
+                color: "#aa101418"
+                border.color: "#55ffffff"
+                Column {
+                    id: emptyCol
+                    anchors.centerIn: parent
+                    spacing: 6
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: "No videos found"
+                        color: "white"
+                        font.pixelSize: 16
+                        font.weight: Font.DemiBold
+                    }
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: "dir: " + playlist.resolvedDirectory
+                        color: "#aaffffff"
+                        font.pixelSize: 11
+                    }
+                    Text {
+                        anchors.horizontalCenter: parent.horizontalCenter
+                        text: "add *.mp4 / *.mkv / *.webm to preview"
+                        color: "#88ffffff"
+                        font.pixelSize: 11
+                    }
+                }
+            }
+        }
+
         AuthOverlay {
             id: previewAuth
             z: 5
-            // In preview, PAM success just quits so visuals can be tested safely
-            onAuthSucceeded: Qt.quit()
+            authContext: authCtx
+            // QLOCK_PREVIEW_MOUSE=0 previews the mouse-free lock build:
+            // keyboard only (any key reveals, Enter submits). Quit via
+            // successful auth (real PAM) or kill the process.
+            mouseEnabled: (Quickshell.env("QLOCK_PREVIEW_MOUSE") || "1") !== "0"
+        }
+
+        // Same invisible-cursor layer as the real lock, preview-only and
+        // only when mouse is disabled. Below the quit pill (z:10) so the
+        // pill stays visible; clicks pass through everywhere (NoButton).
+        MouseArea {
+            anchors.fill: parent
+            z: 6
+            visible: !previewAuth.mouseEnabled
+            hoverEnabled: true
+            acceptedButtons: Qt.NoButton
+            cursorShape: Qt.BlankCursor
         }
 
         Rectangle {
@@ -147,7 +164,7 @@ ShellRoot {
                 anchors.centerIn: parent
                 spacing: 6
                 Text { text: "Preview"; color: "#ffcc00"; font.pixelSize: 11; font.weight: Font.DemiBold }
-                Text { text: "• hover/key to reveal • click quit"; color: "#88ffffff"; font.pixelSize: 10 }
+                Text { text: "• hover/Enter to reveal • click quit"; color: "#88ffffff"; font.pixelSize: 10 }
             }
             MouseArea {
                 anchors.fill: parent

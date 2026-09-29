@@ -94,21 +94,33 @@ in
       #!${bash}/bin/bash
       SAVED=""
       if [ -n "$XDG_RUNTIME_DIR" ]; then SAVED="$XDG_RUNTIME_DIR/qlock-volpin"; fi
+      # Start marker: only a save-file NEWER than this session may be
+      # restored. A stale leftover from an older crashed session must never
+      # overwrite the user's current mixer — it is deleted unrestored.
+      # (Also covers the QML cleaner race: if Qt.quit() outruns the async
+      # `rm`, the next session sees a same-or-older file and drops it.)
+      REF=""
+      if [ -n "$XDG_RUNTIME_DIR" ]; then REF="$(${coreutils}/bin/mktemp -p "$XDG_RUNTIME_DIR" .qlock-ref-XXXXXX 2>/dev/null || true)"; fi
       SELF="$(${coreutils}/bin/readlink -f "$0")"
       LOCK_BIN="$(${coreutils}/bin/dirname "$SELF")/../libexec/qlock-lock"
       restore_sink() {
         if [ -n "$SAVED" ] && [ -f "$SAVED" ]; then
-          VOL=""
-          MUTED=""
-          read -r VOL MUTED < "$SAVED" || true
-          if [ -n "$VOL" ]; then
-            ${wireplumber}/bin/wpctl set-volume @DEFAULT_AUDIO_SINK@ "$VOL" >/dev/null 2>&1 || true
+          if [ -n "$REF" ] && [ -f "$REF" ] && [ "$SAVED" -ot "$REF" ]; then
+            ${coreutils}/bin/rm -f "$SAVED"
+          else
+            VOL=""
+            MUTED=""
+            read -r VOL MUTED < "$SAVED" || true
+            if [ -n "$VOL" ]; then
+              ${wireplumber}/bin/wpctl set-volume @DEFAULT_AUDIO_SINK@ "$VOL" >/dev/null 2>&1 || true
+            fi
+            if [ -n "$MUTED" ]; then
+              ${wireplumber}/bin/wpctl set-mute @DEFAULT_AUDIO_SINK@ "$MUTED" >/dev/null 2>&1 || true
+            fi
+            ${coreutils}/bin/rm -f "$SAVED"
           fi
-          if [ -n "$MUTED" ]; then
-            ${wireplumber}/bin/wpctl set-mute @DEFAULT_AUDIO_SINK@ "$MUTED" >/dev/null 2>&1 || true
-          fi
-          ${coreutils}/bin/rm -f "$SAVED"
         fi
+        if [ -n "$REF" ]; then ${coreutils}/bin/rm -f "$REF"; fi
       }
       shutdown() {
         if [ -n "$CHILD_PID" ]; then
@@ -145,10 +157,9 @@ in
       test -x $out/bin/qlock
       test -f $out/libexec/qlock-lock
       ${bash}/bin/bash -n $out/bin/qlock
-      for f in PlaylistEngine VideoBackground AuthOverlay SuspendWatcher SystemVolumeWatcher; do
+      for f in PlaylistEngine VideoBackground AuthOverlay AuthContext ConfigLoader SuspendWatcher SystemVolumeWatcher; do
         test -f $out/share/qlock/components/$f.qml
       done
-      ${qt6.qtbase}/bin/qdbuscpp2xml --help >/dev/null 2>&1 || true
     '';
 
     meta = {

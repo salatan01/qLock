@@ -3,6 +3,13 @@
 Production `ext-session-lock` screen: shuffled video wallpaper, seamless
 looping, frosted-glass PAM HUD, suspend-aware playback.
 
+The lock is **mouse-free by design**: no cursor (invisible), nothing is
+clickable — the video stays perfectly clean. Keyboard only:
+
+- Enter → opens the password box (also while a cooldown shows)
+- type password, Enter → submit • Esc → clear typed text, Esc again → close
+- Caps Lock → hint appears. Box auto-hides after 10s idle when empty.
+
 ## Install (NixOS flake)
 
 ```nix
@@ -94,15 +101,31 @@ supervisor itself is unrecoverable — true in any language).
   "mode": "random",
   "fixedFile": "",
   "repeat": true,
-  "volume": 20
+  "playback": 0,
+  "volume": 20,
+  "pinSink": true
 }
 ```
+
+`playback` controls repeats per video in `random` mode before the playlist
+advances — `2` is "2playback" (same video twice, then a new random video
+twice, …), `3` is "3playback", `1` plays once then advances (same as
+`repeat: false`), `0` loops the current video forever (the legacy
+`repeat: true` default). Repeats are seamless: the backend loops the decoded
+stream internally via `MediaPlayer.loops`, so there is no stop/reload black
+flash between plays. `playback` is ignored when `repeat` is `false` (always
+single plays) and in `fixed` mode (the single video loops forever —
+advancing is meaningless). Hand-written JSON may also use `playbackCount`,
+`repeatCount` or `playCount` as aliases; values are clamped to 0–100 and
+invalid values fall back to infinite with a warning. Set `QLOCK_DEBUG=1` for
+verbose volume/loop logging.
 
 ## Dev
 
 ```bash
 nix develop
 nix run .#preview
+QLOCK_PREVIEW_MOUSE=0 nix run .#preview  # preview the mouse-free lock build
 nix flake check
 nix build .#qlock
 ```
