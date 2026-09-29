@@ -31,12 +31,11 @@
         ];
       };
 
+    # Mirrors nix/package.nix: minimal runtime set (see comment there).
     qtDepsFor = pkgs:
       with pkgs.qt6; [
         qtbase
         qtdeclarative # QML core + qmlls
-        qtsvg
-        qtimageformats
         qtmultimedia
         qt5compat
         qtwayland # WlSessionLock
@@ -48,7 +47,6 @@
         gst-plugins-base
         gst-plugins-good
         gst-plugins-bad
-        gst-plugins-ugly
         gst-libav
       ];
   in {

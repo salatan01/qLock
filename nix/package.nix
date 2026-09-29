@@ -6,18 +6,21 @@
   qt6,
   gst_all_1,
   dbus,
-  systemd,
   wireplumber,
   bash,
   coreutils,
   version ? "0.1.0",
   src,
 }: let
+  # Minimal runtime set — keep this lean, every entry lands in the closure:
+  # - qtbase/declarative/multimedia/wayland/5compat: QML core, video,
+  #   session-lock, OpacityMask glass. (NOT qtsvg/qtimageformats: no SVG or
+  #   raster images anywhere in the QML.)
+  # - base/good/bad/libav: mp4 demux (good), h264/aac parse+decode
+  #   (bad/libav). (NOT ugly: only mpeg2/asf/dvd legacy formats.)
   qtDeps = with qt6; [
     qtbase
     qtdeclarative
-    qtsvg
-    qtimageformats
     qtmultimedia
     qt5compat
     qtwayland
@@ -28,7 +31,6 @@
     gst-plugins-base
     gst-plugins-good
     gst-plugins-bad
-    gst-plugins-ugly
     gst-libav
   ];
 
@@ -43,10 +45,11 @@
   ];
 
   gstPath = lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" gstDeps;
-  # dbus/systemd: SuspendWatcher (dbus-monitor). wireplumber: loudness lock
-  # (wpctl). bash/coreutils: QML helper processes (sh save-file, rm) and the
-  # supervisor script's readlink.
-  binPath = lib.makeBinPath [dbus systemd wireplumber bash coreutils];
+  # Minimal PATH for QML helper processes: dbus-monitor (SuspendWatcher,
+  # from dbus/bin), wpctl (loudness lock), sh/rm (save-file + supervisor).
+  # Notably NOT systemd: nothing invokes systemctl/loginctl — and it costs
+  # ~190MB of closure. NOT niri either (dev-shell only, never packaged).
+  binPath = lib.makeBinPath [dbus wireplumber bash coreutils];
 in
   stdenvNoCC.mkDerivation {
     pname = "qlock";
