@@ -51,6 +51,11 @@ in {
             default = true;
             description = "Anchor the default sink at its lock-time level while locked (restore on unlock). Never raised above the anchor.";
           };
+          showTitle = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = "Show a bottom-center now-playing pill with the current video's file name.";
+          };
         };
       };
       default = {};

@@ -69,6 +69,16 @@ in {
               only.
             '';
           };
+          showTitle = lib.mkOption {
+            type = lib.types.bool;
+            default = true;
+            description = ''
+              Show a bottom-center "now playing" pill with the current video's
+              file name (humanized, extension stripped). Persists across
+              repeats; pulses softly on track change. Disable for a
+              fully clean screen.
+            '';
+          };
         };
       };
       default = {};

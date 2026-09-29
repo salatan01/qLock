@@ -172,9 +172,19 @@ ShellRoot {
             AuthOverlay {
                 z: 3
                 authContext: authCtx
-                // Mouse-free lock: keyboard only (any key reveals, Enter
-                // submits, Esc hides). All MouseAreas inside go dead.
+                // Mouse-free lock: keyboard only (Enter reveals, Esc hides).
+                // All MouseAreas inside go dead.
                 mouseEnabled: false
+            }
+
+            // Now-playing title, bottom-center. Toggle: showTitle:false.
+            VideoTitle {
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 28
+                z: 2
+                videoUrl: playlist.currentVideoUrl
+                show: cfg.config.showTitle !== false
             }
 
             // Invisible cursor: topmost, hover-enabled so its shape wins

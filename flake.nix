@@ -142,7 +142,7 @@
         touch $out
       '';
       qml-present = pkgs.runCommand "qlock-qml-present" {} ''
-        for f in shell.qml test.qml components/PlaylistEngine.qml components/VideoBackground.qml components/AuthOverlay.qml components/AuthContext.qml components/ConfigLoader.qml components/SuspendWatcher.qml components/SystemVolumeWatcher.qml config/config.json; do
+        for f in shell.qml test.qml components/PlaylistEngine.qml components/VideoBackground.qml components/VideoTitle.qml components/AuthOverlay.qml components/AuthContext.qml components/ConfigLoader.qml components/SuspendWatcher.qml components/SystemVolumeWatcher.qml config/config.json; do
           test -f ${./.}/$f || (echo "missing $f" && exit 1)
         done
         touch $out

@@ -132,9 +132,18 @@ ShellRoot {
             z: 5
             authContext: authCtx
             // QLOCK_PREVIEW_MOUSE=0 previews the mouse-free lock build:
-            // keyboard only (any key reveals, Enter submits). Quit via
+            // keyboard only (Enter reveals, Esc hides). Quit via
             // successful auth (real PAM) or kill the process.
             mouseEnabled: (Quickshell.env("QLOCK_PREVIEW_MOUSE") || "1") !== "0"
+        }
+
+        VideoTitle {
+            anchors.horizontalCenter: parent.horizontalCenter
+            anchors.bottom: parent.bottom
+            anchors.bottomMargin: 28
+            z: 3
+            videoUrl: playlist.currentVideoUrl
+            show: cfg.config.showTitle !== false
         }
 
         // Same invisible-cursor layer as the real lock, preview-only and

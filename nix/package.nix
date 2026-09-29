@@ -62,7 +62,7 @@ in
     installPhase = ''
           runHook preInstall
 
-          mkdir -p $out/share/qlock/components $out/share/qlock/config $out/bin
+          mkdir -p $out/share/qlock/components $out/share/qlock/config $out/bin $out/libexec
 
           cp ${src}/shell.qml $out/share/qlock/shell.qml
           cp ${src}/test.qml $out/share/qlock/test.qml
@@ -155,9 +155,10 @@ in
       test -f $out/share/qlock/shell.qml
       test -f $out/share/qlock/test.qml
       test -x $out/bin/qlock
+      test -x $out/bin/qlock-preview
       test -f $out/libexec/qlock-lock
       ${bash}/bin/bash -n $out/bin/qlock
-      for f in PlaylistEngine VideoBackground AuthOverlay AuthContext ConfigLoader SuspendWatcher SystemVolumeWatcher; do
+      for f in PlaylistEngine VideoBackground VideoTitle AuthOverlay AuthContext ConfigLoader SuspendWatcher SystemVolumeWatcher; do
         test -f $out/share/qlock/components/$f.qml
       done
     '';
@@ -167,7 +168,7 @@ in
       longDescription = ''
         Production PAM lockscreen: random/shuffled video wallpaper with
         seamless looping, frosted-glass auth HUD, suspend-aware playback,
-        sink-pinned bg loudness (immune to system volume), crash-safe mixer
+        sink-anchored bg loudness (immune to system volume), crash-safe mixer
         restore via supervisor trap, and layered JSON config.
       '';
       homepage = "https://github.com/salatan01/qlock";

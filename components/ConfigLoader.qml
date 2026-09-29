@@ -30,7 +30,8 @@ Item {
         repeat: true,
         playback: 0,
         volume: 20,
-        pinSink: true
+        pinSink: true,
+        showTitle: true
     })
 
     // Set QLOCK_DEBUG=1 to get per-change volume/sink logs.
