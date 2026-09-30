@@ -65,6 +65,10 @@ Item {
     property bool debug: false
 
     signal ended()
+    // Undecodable file (missing codec, truncated mp4, ...). Shells route
+    // this to playlist.skipFailed() for an immediate gapless jump — the
+    // stall-forever warn-only path is gone. Emitted at most once per URL.
+    signal failed(string reason)
 
     // Explicit in-place replay for fixed mode safety (normally never needed:
     // fixed uses playCount=0 → infinite → EndOfMedia never fires). Does NOT
@@ -105,7 +109,14 @@ Item {
         }
 
         onErrorOccurred: (error, errorString) => {
-            console.warn("qLock: MediaPlayer error:", errorString);
+            const src = player.source.toString();
+            // Dedup: Qt can fire error repeatedly for one bad file; only
+            // the first should trigger a skip (no rapid multi-skip).
+            if (src.length > 0 && src !== root._lastErrorSrc) {
+                root._lastErrorSrc = src;
+                console.warn("qLock: MediaPlayer error, skipping:", errorString);
+                root.failed(errorString);
+            }
         }
     }
 
@@ -115,7 +126,11 @@ Item {
         fillMode: VideoOutput.PreserveAspectCrop
     }
 
+    property string _lastErrorSrc: ""
+
     onSourceChanged: {
+        // New URL arms the error guard again.
+        if (player.source.toString() !== source) root._lastErrorSrc = "";
         // Skip redundant reloads (e.g. fixed-mode re-signalling the same URL):
         // a needless stop()/play() cycle is itself a visible stutter.
         if (source.length > 0 && player.source.toString() !== source) {

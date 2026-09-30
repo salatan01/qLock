@@ -31,6 +31,8 @@ ShellRoot {
         videoDirectory: cfg.config.videoDirectory
         mode: cfg.config.mode
         fixedFile: cfg.config.fixedFile
+        // Preview is isolated: never reads/writes long-memory history.
+        enableHistory: false
 
         onCountChanged: console.log("qLock[test]: PlaylistEngine count", count, "dir", playlist.resolvedDirectory, "(raw:", cfg.config.videoDirectory + ")")
     }
@@ -76,6 +78,9 @@ ShellRoot {
             onEnded: {
                 if (playlist.mode === "fixed") previewVideo.restart()
                 else playlist.next()
+            }
+            onFailed: {
+                if (playlist.mode !== "fixed") playlist.skipFailed()
             }
         }
 

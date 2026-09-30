@@ -28,9 +28,10 @@ import Quickshell.Io
 //    restore it even if quickshell dies (no in-process language — QML,
 //    Rust, anything — can run code after SIGKILL).
 //    The preview (test.qml) never pins: pinned stays false there.
-// Requires `wpctl` (wireplumber) + `sh`/`rm` on PATH — the nix wrapper
-// provides all three. Without wpctl we keep defaults (sinkVolume 1.0 =
-// plain relative volume) and pinning degrades to a warning.
+// Requires `wpctl` (wireplumber) + `rm` on PATH — the nix wrapper
+// provides both. The crash-save file is written via FileView (atomic
+// temp+rename, no shell, no quoting risk). Without wpctl we keep defaults
+// (sinkVolume 1.0 = plain relative volume) and pinning degrades to a warning.
 Item {
     id: root
 
@@ -165,17 +166,24 @@ Item {
     property bool _queuedMute: false
     property bool _haveQueued: false
 
+    readonly property string savePath: root._saveFilePath()
+
     function _saveFilePath() {
         const rt = Quickshell.env("XDG_RUNTIME_DIR") || "";
-        if (rt.length === 0 || rt.includes("'") || rt.includes("\n")) return "";
+        // Strict: runtime dir must be a plain absolute path. Anything with
+        // shell metachars, newline or traversal is rejected (no write).
+        if (rt.length === 0 || !rt.startsWith("/")) return "";
+        if (/[\n'"`$\\|;&()<>!]/.test(rt) || rt.includes("..")) return "";
         return rt + "/qlock-volpin";
     }
 
     function _writeSaveFile() {
-        const p = root._saveFilePath();
-        if (p.length === 0) return;
-        saver.command = ["sh", "-c", "printf '%s %s\n' '" + root._savedVolume.toFixed(3) + "' '" + (root._savedMuted ? "1" : "0") + "' > '" + p + "'"];
-        if (!saver.running) saver.running = true;
+        if (root.savePath.length === 0) return;
+        // Numeric-only payload, fixed format "<vol> <0|1>\n". Atomic via
+        // FileView so the supervisor never sees a torn write.
+        const v = Number(root._savedVolume);
+        if (isNaN(v)) return;
+        volpinFile.setText(v.toFixed(3) + " " + (root._savedMuted ? "1" : "0") + "\n");
     }
 
     onPinnedChanged: {
@@ -226,8 +234,13 @@ Item {
         onExited: root._drainQueue()
     }
 
-    Process {
-        id: saver
+    // Crash-save mirror for the supervisor EXIT trap. Atomic writes only.
+    FileView {
+        id: volpinFile
+        path: root.savePath.length > 0 ? root.savePath : ""
+        atomicWrites: true
+        watchChanges: false
+        printErrors: false
     }
 
     Process {

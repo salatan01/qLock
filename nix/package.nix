@@ -9,7 +9,7 @@
   wireplumber,
   bash,
   coreutils,
-  version ? "0.1.0",
+  version ? "0.1.1",
   src,
 }: let
   # Minimal runtime set — keep this lean, every entry lands in the closure:
@@ -95,6 +95,33 @@ in
       # any user PATH.
       cat > $out/bin/qlock <<'LAUNCHER_EOF'
       #!${bash}/bin/bash
+      # Long-memory shuffle lives here (shared with PlaylistEngine.qml
+      # _stateBase): per-folder played lists, JSON, 0600-dir protected.
+      HIST_BASE=""
+      if [ -n "$XDG_STATE_HOME" ]; then HIST_BASE="$XDG_STATE_HOME";
+      elif [ -n "$HOME" ]; then HIST_BASE="$HOME/.local/state"; fi
+      HIST_FILE=""
+      if [ -n "$HIST_BASE" ]; then HIST_FILE="$HIST_BASE/qlock/history.json"; fi
+      if [ "''${1:-}" = "clear-cache" ] || [ "''${1:-}" = "--clear-cache" ] || [ "''${1:-}" = "clear_cache" ]; then
+        if [ -n "$HIST_FILE" ] && [ -f "$HIST_FILE" ]; then
+          ${coreutils}/bin/rm -f "$HIST_FILE"
+          echo "qlock: cleared shuffle history ($HIST_FILE)"
+        else
+          echo "qlock: no shuffle history to clear"
+        fi
+        exit 0
+      fi
+      if [ "''${1:-}" = "--help" ] || [ "''${1:-}" = "-h" ] || [ "''${1:-}" = "help" ]; then
+        echo "Usage: qlock [--help] [clear-cache]"
+        echo "  (no args)   lock the session (production ext-session-lock surface)"
+        echo "  clear-cache drop long-memory shuffle history, allow repeats again"
+        exit 0
+      fi
+      # Ensure history dir exists for QML FileView atomic writes (best effort).
+      if [ -n "$HIST_BASE" ]; then
+        ${coreutils}/bin/mkdir -p -m 0700 "$HIST_BASE/qlock" 2>/dev/null || ${coreutils}/bin/mkdir -p "$HIST_BASE/qlock" 2>/dev/null || true
+        ${coreutils}/bin/chmod 0700 "$HIST_BASE/qlock" 2>/dev/null || true
+      fi
       SAVED=""
       if [ -n "$XDG_RUNTIME_DIR" ]; then SAVED="$XDG_RUNTIME_DIR/qlock-volpin"; fi
       # Start marker: only a save-file NEWER than this session may be
@@ -161,6 +188,8 @@ in
       test -x $out/bin/qlock-preview
       test -f $out/libexec/qlock-lock
       ${bash}/bin/bash -n $out/bin/qlock
+      grep -q "clear-cache" $out/bin/qlock
+      grep -q "history.json" $out/bin/qlock
       for f in PlaylistEngine VideoBackground VideoTitle AuthOverlay AuthContext ConfigLoader SuspendWatcher SystemVolumeWatcher; do
         test -f $out/share/qlock/components/$f.qml
       done

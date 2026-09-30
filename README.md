@@ -4,8 +4,10 @@ Production `ext-session-lock` screen: shuffled video wallpaper, seamless
 looping, frosted-glass PAM HUD, suspend-aware playback, anchored loudness
 lock, and a now-playing title pill.
 
-- **Video wallpaper** — random (non-repeating shuffle) or one fixed file,
-  seamless in-player looping with no black flash between plays or repeats.
+- **Video wallpaper** — random (long-memory shuffle, no repeats until every
+  video has played once, per-folder history in `$XDG_STATE_HOME/qlock/history.json`)
+  or one fixed file, seamless in-player looping with no black flash between
+  plays or repeats. Reset with `qlock clear-cache`.
 - **Mouse-free by design** — no cursor, nothing clickable; keyboard only.
 - **Frosted-glass auth card** — clock, user pill, password box, Caps Lock
   hint, throttle + lockout, shake/success animations.
@@ -182,9 +184,12 @@ pill while the first scan is still in flight.
 
 ### `mode` (string, default `"random"`)
 
-- `"random"` — shuffled playlist: every video plays once in random order
-  before anything repeats, then the bag is reshuffled. This is the mode
-  `playback` counts against.
+- `"random"` — long-memory shuffled playlist: every video plays once in
+  random order before anything repeats, remembered across locks/restarts
+  per-folder (even 10 days later a played video stays excluded). When all
+  have played, a fresh cycle auto-starts (boundary repeat avoided when
+  possible). This is the mode `playback` counts against. Reset with
+  `qlock clear-cache`. Preview (`qlock-preview`) never touches history.
 - `"fixed"` — one single video, looped forever (see `fixedFile`).
 
 ### `fixedFile` (string, default `""`)
@@ -286,6 +291,8 @@ only once you create it.
 | `wpctl unavailable` warning | WirePlumber missing — volume stays mixer-relative; install wireplumber for the loudness lock |
 | `VDPAU` / `VK_KHR_video_decode_queue` lines | Hardware-decode fallback to software — harmless, video still plays |
 | `dbus-monitor exited` warning | Suspend hook restarting in 3s — harmless unless suspend-pause stops working |
+| Same video never replays / want repeats again | Long-memory shuffle is doing its job — run `qlock clear-cache` to reset history |
+| `history corrupt, starting fresh` warning | History JSON was hand-edited or truncated — deleted entry ignored, fresh cycle started |
 
 ## Environment knobs
 

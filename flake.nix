@@ -16,7 +16,7 @@
     forAllSystems = nixpkgs.lib.genAttrs systems;
     pkgsFor = system: import nixpkgs {inherit system;};
 
-    version = "0.1.0";
+    version = "0.1.1";
 
     # Ship only runtime inputs: QML + default config. Flake/nix/*.md churn
     # must not rebuild the package.

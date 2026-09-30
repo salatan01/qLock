@@ -24,10 +24,13 @@ ShellRoot {
     function _handleUnlock() {
         // Restore the pre-lock sink gain first; the EXIT trap in the `qlock`
         // wrapper is the backstop if quit ever outruns the async restore.
-        // Unlock is delayed ~800ms so wpctl lands before we exit (the
-        // success fade covers the wait), then 400ms more so the unlock
-        // commits to the compositor before the process exits.
+        // Flush shuffle history too: the 400ms save debounce must not be
+        // outrun by quit, or this play goes unrecorded and may repeat.
+        // Unlock is delayed ~800ms so wpctl + the history write land before
+        // we exit (the success fade covers the wait), then 400ms more so
+        // the unlock commits to the compositor before the process exits.
         sysVol.restore()
+        playlist.flushHistory()
         unlockTimer.start()
     }
 
@@ -65,6 +68,7 @@ ShellRoot {
         videoDirectory: cfg.config.videoDirectory
         mode: cfg.config.mode
         fixedFile: cfg.config.fixedFile
+        enableHistory: true
     }
 
     // MAIN LOCKSHELL — video as wallpaper
@@ -95,6 +99,11 @@ ShellRoot {
                 onEnded: {
                     if (playlist.mode === "fixed") bgVideo.restart()
                     else playlist.next()
+                }
+                // Corrupt file: gapless jump, no stall. Fixed mode has
+                // nowhere to jump — stay put (error guard dedups, no spin).
+                onFailed: {
+                    if (playlist.mode !== "fixed") playlist.skipFailed()
                 }
             }
 
