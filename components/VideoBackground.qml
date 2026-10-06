@@ -13,12 +13,26 @@ Item {
     property real volume: 20
     // Live default-sink gain (0-1, up to 1.5) from SystemVolumeWatcher.
     // Qt applies AudioOutput.volume BEFORE the sink gain, so unpinned
-    // playback divides the sink back out (see below). While PINNED the
-    // sink is anchored at the lock-time level, so the stream must be the
-    // raw target — compensating on top would multiply the anchor away.
+    // playback divides the sink back out (see below). While PINNED the sink
+    // itself is forced to the configured volume (pinLevel = config target):
+    // the stream holds slider-correct loudness F = pinLevel^3 constant by
+    // compensating live sink moves (stream = F / live^3, clamped 0-1).
+    // When live == pinLevel this is exactly 1.0 (full stream at target
+    // sink = slider-correct loudness). During the force transition and any
+    // button-press window the stream drops/raises opposite instantly, so bg
+    // never follows system and never blasts (e.g. sink still 0.90 while
+    // target is 0.20: stream ~0.01, final still F, not 0.73).
     property real sinkVolume: 1.0
     property bool sinkMuted: false
     property bool pinActive: false
+    // Configured sink target (SystemVolumeWatcher.pinLevel = normalized
+    // volume) + mute captured at lock time (pinMuted). Ignored unless pinActive.
+    property real pinLevel: 1.0
+    property bool pinMuted: false
+    // Unlock fade: forced silent (bound to SystemVolumeWatcher.streamSilenced).
+    // Synchronous — kills the restore blast where async `wpctl set-volume`
+    // jumps the real sink loud ~200ms before polling notices. Wins over everything.
+    property bool silenced: false
     // Config value normalized to 0-1, before sink compensation.
     readonly property real targetVolume: {
         var v = Number(root.volume);
@@ -26,14 +40,31 @@ Item {
         if (v <= 1.0) return Math.max(0, Math.min(1, v));
         return Math.max(0, Math.min(1, v / 100.0));
     }
-    // What actually goes to AudioOutput. Pinned (real lock): raw target —
-    // the anchored sink IS the reference, any extra math redefines "20".
-    // Unpinned (preview/transitions): divide out the cubic sink curve.
+    // What actually goes to AudioOutput.
+    // Pinned (real lock): sink is forced to pinLevel (config), stream holds
+    //   F = pinLevel^3 constant: stream = F / live^3, clamped 0-1.
+    //   live == pinLevel → 1.0 (full stream, slider-correct loudness).
+    //   Muted-at-lock (pinMuted): stream 0 always — stays silent even if
+    //   something unmutes the sink mid-lock (enforcer re-mutes right after).
+    //   Live-muted (user hit mute): sink mute silences anyway, hold 1.0 so
+    //   unmute snaps back to F with no jump.
+    // Unpinned (preview / pinSink:false): divide out the cubic sink curve to
+    // hold linear target.
     // Muted/near-zero sink: hold target (silent anyway — avoids div-by-zero
     // and full-blast on unmute). Sink quieter than target: clamps at 1.0,
     // sink gain is the floor.
     readonly property real effectiveVolume: {
-        if (root.pinActive) return root.targetVolume;
+        if (root.silenced) return 0;
+        if (root.pinActive) {
+            if (root.pinMuted) return 0;
+            if (root.sinkMuted) return 1.0;
+            if (root.sinkVolume <= 0.01) return 1.0;
+            const anchor = Math.max(0, Math.min(1, root.pinLevel));
+            const live = Math.max(0.001, Math.min(1.5, root.sinkVolume));
+            const locked = anchor * anchor * anchor;
+            if (locked <= 0) return 0;
+            return Math.max(0, Math.min(1, locked / Math.max(live * live * live, 0.001)));
+        }
         if (root.sinkMuted || root.sinkVolume <= 0.01) return root.targetVolume;
         const g = root.sinkVolume * root.sinkVolume * root.sinkVolume;
         return Math.max(0, Math.min(1, root.targetVolume / Math.max(g, 0.001)));

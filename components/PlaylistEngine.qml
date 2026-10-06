@@ -353,6 +353,27 @@ Item {
         root._flushHistory();
     }
 
+    // Wipe played memory + disk entry for the current folder. Used for
+    // `qlock clear-cache` parity and automatically when a cycle completes
+    // (all videos played once) so history.json can't grow forever and the
+    // next cycle starts clean. Other folders' entries are preserved.
+    // Synchronous: bypasses the 400ms debounce so quit/crash can't
+    // resurrect a stale full list.
+    function clearHistory() {
+        root._playedMap = ({});
+        saveTimer.stop();
+        if (!root.enableHistory || root._historyPath.length === 0) return;
+        if (!root.resolvedDirectory) return;
+        try {
+            if (!root._historyData.dirs) root._historyData.dirs = {};
+            delete root._historyData.dirs[root.resolvedDirectory];
+            histFile.setText(JSON.stringify({ version: 1, dirs: root._historyData.dirs }));
+            console.log("qLock: history cleared for", root.resolvedDirectory);
+        } catch (e) {
+            console.warn("qLock: history clear failed:", String(e).slice(0, 120));
+        }
+    }
+
     // ---- Cycle construction ----
 
     function _maybePickInitial() {
@@ -369,8 +390,16 @@ Item {
             return;
         }
         root._prunePlayed();
-        const bag = root._buildCycleBag("");
-        if (bag.length === 0) return;
+        let bag = root._buildCycleBag("");
+        if (bag.length === 0) {
+            // History says everything already played (previous locks
+            // filled it): cycle is complete — auto-clear and start fresh
+            // instead of sitting on a black screen with no video.
+            console.log("qLock: cycle complete — auto-clearing history for", root.resolvedDirectory);
+            root.clearHistory();
+            bag = root._buildCycleBag("");
+            if (bag.length === 0) return;
+        }
         root._shuffleBag = bag;
         root._shuffleIndex = 0;
         const url = root._urlAt(bag[0]);
@@ -406,14 +435,30 @@ Item {
     }
 
     function _startFreshCycle() {
-        // Auto-reshuffle: every video played once → new cycle, keep going.
-        // Bad (corrupt) files stay excluded for this process lifetime.
+        // Cycle complete: every video played once → auto-clear persisted
+        // history so history.json resets instead of growing forever, then
+        // start a new shuffled cycle. Bad (corrupt) files stay excluded
+        // for this process lifetime.
+        // Disk wipe is synchronous (not debounced): a quit/crash between
+        // cycles must not resurrect the just-finished full played list.
+        console.log("qLock: cycle complete — auto-clearing history for", root.resolvedDirectory);
         const keepBad = root._badMap;
         root._playedMap = ({});
         root._badMap = keepBad;
+        saveTimer.stop();
+        if (root.enableHistory && root._historyPath.length > 0 && root.resolvedDirectory) {
+            try {
+                if (!root._historyData.dirs) root._historyData.dirs = {};
+                delete root._historyData.dirs[root.resolvedDirectory];
+                histFile.setText(JSON.stringify({ version: 1, dirs: root._historyData.dirs }));
+            } catch (e) {
+                console.warn("qLock: history clear failed:", String(e).slice(0, 120));
+            }
+        }
         const bag = root._buildCycleBag(root._lastFileName);
         if (bag.length === 0) return [];
-        if (root.enableHistory) root._scheduleSave();
+        // Don't schedule an empty save here: the caller's _recordPlayed
+        // writes the first entry of the new cycle ~400ms later.
         return bag;
     }
 

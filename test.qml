@@ -71,6 +71,9 @@ ShellRoot {
             sinkVolume: sysVol.sinkVolume
             sinkMuted: sysVol.sinkMuted
             pinActive: sysVol.pinActive
+            pinLevel: sysVol.pinLevel
+            pinMuted: sysVol.pinMuted
+            silenced: sysVol.streamSilenced
             suspended: suspendWatcher.suspended
             loop: cfg.config.repeat !== false
             playCount: cfg.config.mode === "fixed" ? 0 : cfg.effectivePlayCount()

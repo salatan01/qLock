@@ -9,6 +9,7 @@
   wireplumber,
   bash,
   coreutils,
+  procps,
   version ? "0.1.1",
   src,
 }: let
@@ -46,10 +47,12 @@
 
   gstPath = lib.makeSearchPathOutput "lib" "lib/gstreamer-1.0" gstDeps;
   # Minimal PATH for QML helper processes: dbus-monitor (SuspendWatcher,
-  # from dbus/bin), wpctl (loudness lock), sh/rm (save-file + supervisor).
+  # from dbus/bin), wpctl (loudness lock), sh/rm (save-file + supervisor),
+  # pkill (post-unlock stall backstop in shell.qml — SIGTERMs a hung lock
+  # body; supervisor EXIT trap still restores the mixer).
   # Notably NOT systemd: nothing invokes systemctl/loginctl — and it costs
   # ~190MB of closure. NOT niri either (dev-shell only, never packaged).
-  binPath = lib.makeBinPath [dbus wireplumber bash coreutils];
+  binPath = lib.makeBinPath [dbus wireplumber bash coreutils procps];
 in
   stdenvNoCC.mkDerivation {
     pname = "qlock";
@@ -141,6 +144,9 @@ in
             VOL=""
             MUTED=""
             read -r VOL MUTED < "$SAVED" || true
+            # Mute-transit: silence first so jumping the volume back (e.g.
+            # 0.20 -> 0.75) can't surge video or background audio mid-jump.
+            ${wireplumber}/bin/wpctl set-mute @DEFAULT_AUDIO_SINK@ 1 >/dev/null 2>&1 || true
             if [ -n "$VOL" ]; then
               ${wireplumber}/bin/wpctl set-volume @DEFAULT_AUDIO_SINK@ "$VOL" >/dev/null 2>&1 || true
             fi

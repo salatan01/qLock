@@ -1,5 +1,6 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import Quickshell.Wayland
 
 import "./components"
@@ -8,6 +9,10 @@ import "./components"
 // This is the real ext-session-lock surface. Test visuals with test.qml first.
 ShellRoot {
     id: root
+    // Guard: PAM success must unlock exactly once. Without this a double
+    // onAuthSucceeded (multi-surface race) would restart timers mid-quit
+    // and delay exit — leaving the volume pin alive longer than needed.
+    property bool _unlocked: false
 
     // Layered JSON config + playback normalization (see ConfigLoader.qml).
     ConfigLoader {
@@ -22,6 +27,9 @@ ShellRoot {
     }
 
     function _handleUnlock() {
+        // Idempotent: second success while quitting is a no-op.
+        if (root._unlocked) return;
+        root._unlocked = true;
         // Restore the pre-lock sink gain first; the EXIT trap in the `qlock`
         // wrapper is the backstop if quit ever outruns the async restore.
         // Flush shuffle history too: the 400ms save debounce must not be
@@ -29,9 +37,15 @@ ShellRoot {
         // Unlock is delayed ~800ms so wpctl + the history write land before
         // we exit (the success fade covers the wait), then 400ms more so
         // the unlock commits to the compositor before the process exits.
+        // Failsafes below guarantee we can never linger pinning the sink:
+        // restore() already stops enforcement synchronously, and the
+        // force-quit + pkill timers kill a stalled process even if
+        // lock.locked=false or Qt.quit() hangs.
         sysVol.restore()
         playlist.flushHistory()
         unlockTimer.start()
+        forceQuitTimer.start()
+        killerTimer.start()
     }
 
     Timer {
@@ -51,16 +65,58 @@ ShellRoot {
         onTriggered: Qt.quit()
     }
 
+    // Stall backstop 1: re-assert unlock + quit. Covers a compositor that
+    // swallowed lock.locked=false or a Qt that ignored the first quit().
+    // Enforcement is already off (restore() ran synchronously), so volume
+    // keys work even before this fires — this just reaps the process.
+    Timer {
+        id: forceQuitTimer
+        interval: 2500
+        repeat: false
+        onTriggered: {
+            lock.locked = false
+            Qt.quit()
+        }
+    }
+
+    // Stall backstop 2 (your `pkill qlock` request, made precise): SIGTERM
+    // the lock body if it is still alive 3.5s after auth. Pattern matches
+    // ONLY the production surface (`share/qlock/shell.qml`) — never the
+    // preview (`test.qml`), never the `qlock` supervisor itself. The
+    // supervisor EXIT trap then runs the final mixer restore, so this is
+    // safe mid-transit. Requires `pkill` (procps) on PATH — provided by
+    // the nix wrapper; on failure we just fall through to Qt.quit().
+    Timer {
+        id: killerTimer
+        interval: 3500
+        repeat: false
+        onTriggered: {
+            if (!killer.running) killer.running = true
+        }
+    }
+
+    Process {
+        id: killer
+        command: ["pkill", "-f", "share/qlock/shell.qml"]
+        onExited: (exitCode, exitStatus) => {
+            // pkill exits 0 = killed something, 1 = nothing matched
+            // (already gone — ideal). Either way, we must be gone too.
+            Qt.quit()
+        }
+    }
+
     SuspendWatcher {
         id: suspendWatcher
     }
 
     SystemVolumeWatcher {
         id: sysVol
-        // Pin the sink while locked so bg loudness is exactly `volume`,
-        // immune to volume buttons. `!== false` keeps pinning on for
-        // legacy configs lacking the key. Preview (test.qml) never pins.
+        // Force the sink to `volume` while locked so bg loudness is exactly
+        // the configured value, immune to volume buttons; pre-lock comes
+        // back on unlock. `!== false` keeps pinning on for legacy configs
+        // lacking the key. Preview (test.qml) never pins.
         pinned: cfg.config.pinSink !== false
+        volumeConfig: cfg.config.volume
     }
 
     PlaylistEngine {
@@ -88,6 +144,9 @@ ShellRoot {
                 sinkVolume: sysVol.sinkVolume
                 sinkMuted: sysVol.sinkMuted
                 pinActive: sysVol.pinActive
+                pinLevel: sysVol.pinLevel
+                pinMuted: sysVol.pinMuted
+                silenced: sysVol.streamSilenced
                 suspended: suspendWatcher.suspended
                 loop: cfg.config.repeat !== false
                 // Fixed mode advances nowhere, so it loops forever in-player
