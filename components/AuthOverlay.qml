@@ -24,6 +24,10 @@ Item {
 
     required property AuthContext authContext
     property bool mouseEnabled: true
+    // Incremented by SuspendWatcher on resume (including a resume inferred
+    // from a missed logind edge). Keyboard focus can be lost across sleep;
+    // the lock must accept input immediately when the screen comes back.
+    property int resumeCount: 0
 
     anchors.fill: parent
     focus: true
@@ -157,6 +161,20 @@ Item {
         function onAuthSucceeded() {
             successAnim.start()
         }
+        function onAuthCanceled() {
+            // Suspend canceled the attempt: never keep a half-typed secret
+            // (or resubmit it after resume). No shake — nothing was wrong.
+            passwordField.text = ""
+            if (root.revealed) passwordField.forceActiveFocus()
+            else root.forceActiveFocus()
+        }
+    }
+
+    onResumeCountChanged: {
+        // Do not rely on the compositor restoring keyboard focus across a
+        // suspend. Re-grab it so the first keypress after wake is not lost.
+        root.forceActiveFocus()
+        if (root.revealed) focusTimer.restart()
     }
 
     // ── Global keys on root (single handler, no competing catcher) ──
@@ -524,6 +542,7 @@ Item {
 
                         TextField {
                             id: passwordField
+                            objectName: "passwordField"
                             anchors.fill: parent
                             anchors.leftMargin: 36
                             anchors.rightMargin: 44
@@ -554,8 +573,13 @@ Item {
                             onTextChanged: {
                                 if (text.length > 0) idleTimer.stop()
                                 else if (root.revealed && !root.hoveringHUD && root.authContext.canAttempt()) idleTimer.start()
-                                root.authContext.clearTransient()
                             }
+                            // Only REAL typing clears an active error/status.
+                            // textChanged also fires for the programmatic clear
+                            // in onAuthFailed, which used to wipe the error
+                            // styling and "timed out" message in the same tick
+                            // they appeared.
+                            onTextEdited: root.authContext.clearTransient()
                             onActiveFocusChanged: if (activeFocus) idleTimer.stop()
                         }
 

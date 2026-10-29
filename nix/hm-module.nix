@@ -44,12 +44,12 @@ in {
           volume = lib.mkOption {
             type = lib.types.numbers.between 0 100;
             default = 20;
-            description = "Background audio on the 0-100 scale.";
+            description = "Background audio as an absolute percentage of full-scale output (20 = 20%, identical in lock and preview).";
           };
           pinSink = lib.mkOption {
             type = lib.types.bool;
             default = true;
-            description = "Anchor the default sink at its lock-time level while locked (restore on unlock). Never raised above the anchor.";
+            description = "Anchor the default sink at its lock-time level while locked (restore on unlock). The anchor constrains the mixer only and never scales `volume`; never raised above the anchor.";
           };
           showTitle = lib.mkOption {
             type = lib.types.bool;

@@ -10,6 +10,7 @@
   bash,
   coreutils,
   procps,
+  util-linux,
   version ? "0.1.1",
   src,
 }: let
@@ -120,6 +121,31 @@ in
         echo "  clear-cache drop long-memory shuffle history, allow repeats again"
         exit 0
       fi
+      # Single-instance guard. Caller configs (hypridle, compositor keybinds,
+      # systemd) can launch qlock concurrently; two lock surfaces fight over
+      # the session lock, and BOTH can keep the sink pinned after one unlocks.
+      # `pidof qlock` cannot see this bash wrapper (it only matches the
+      # quickshell child), so take an advisory lock that the supervisor holds
+      # and the child inherits. XDG_RUNTIME_DIR is preferred; fall back to the
+      # user cache when it is unset (e.g. launched from a bare TTY).
+      LOCK_FILE=""
+      if [ -n "$XDG_RUNTIME_DIR" ] && [ -d "$XDG_RUNTIME_DIR" ]; then
+        LOCK_FILE="$XDG_RUNTIME_DIR/qlock.lock"
+      elif [ -n "$HOME" ]; then
+        ${coreutils}/bin/mkdir -p -m 0700 "$HOME/.cache/qlock" 2>/dev/null || true
+        ${coreutils}/bin/chmod 0700 "$HOME/.cache/qlock" 2>/dev/null || true
+        LOCK_FILE="$HOME/.cache/qlock/qlock.lock"
+      fi
+      if [ -n "$LOCK_FILE" ]; then
+        if ! exec 9>>"$LOCK_FILE"; then
+          echo "qlock: cannot open lock file $LOCK_FILE; continuing without duplicate guard" >&2
+        elif ! ${util-linux}/bin/flock -n 9; then
+          echo "qlock: already running (lock held: $LOCK_FILE)" >&2
+          exit 0
+        fi
+      else
+        echo "qlock: no XDG_RUNTIME_DIR or HOME; duplicate-instance guard disabled" >&2
+      fi
       # Ensure history dir exists for QML FileView atomic writes (best effort).
       if [ -n "$HIST_BASE" ]; then
         ${coreutils}/bin/mkdir -p -m 0700 "$HIST_BASE/qlock" 2>/dev/null || ${coreutils}/bin/mkdir -p "$HIST_BASE/qlock" 2>/dev/null || true
@@ -158,14 +184,39 @@ in
         fi
         if [ -n "$REF" ]; then ${coreutils}/bin/rm -f "$REF"; fi
       }
+      CHILD_PID=""
       shutdown() {
-        if [ -n "$CHILD_PID" ]; then
-          kill "$CHILD_PID" 2>/dev/null || true
+        # Capture the triggering status BEFORE resetting traps: running
+        # `trap - ...` itself overwrites $? with 0.
+        local status=$?
+        trap - EXIT HUP INT TERM
+        # TERM the lock body and give it a moment to exit cleanly before
+        # restoring the mixer. Restoring while quickshell is still alive lets
+        # its own QML exit path race the wrapper's wpctl chain (or re-pin the
+        # sink after we restored it). Bounded: a wedged child cannot block
+        # logout/suspend forever.
+        if [ -n "$CHILD_PID" ] && kill -0 "$CHILD_PID" 2>/dev/null; then
+          kill -TERM "$CHILD_PID" 2>/dev/null || true
+          WAITED=0
+          while kill -0 "$CHILD_PID" 2>/dev/null && [ "$WAITED" -lt 20 ]; do
+            ${coreutils}/bin/sleep 0.1
+            WAITED=$((WAITED + 1))
+          done
+          if kill -0 "$CHILD_PID" 2>/dev/null; then
+            kill -KILL "$CHILD_PID" 2>/dev/null || true
+          fi
+          wait "$CHILD_PID" 2>/dev/null || true
         fi
         restore_sink
+        exit "$status"
       }
       trap shutdown EXIT HUP INT TERM
-      "$LOCK_BIN" "$@" &
+      # Keep fd 9 (the flock) in the supervisor ONLY. If the child inherited
+      # it, an orphaned helper after a quickshell crash (dbus-monitor
+      # survives SIGKILL) would hold the lock forever and block all future
+      # locks. A supervisor SIGKILL releases the guard — untrappable and
+      # preferable to a permanently stuck lockscreen.
+      "$LOCK_BIN" "$@" 9>&- &
       CHILD_PID=$!
       CODE=0
       wait "$CHILD_PID" || CODE=$?
@@ -196,6 +247,8 @@ in
       ${bash}/bin/bash -n $out/bin/qlock
       grep -q "clear-cache" $out/bin/qlock
       grep -q "history.json" $out/bin/qlock
+      grep -q "flock -n 9" $out/bin/qlock
+      grep -q "qlock.lock" $out/bin/qlock
       for f in PlaylistEngine VideoBackground VideoTitle AuthOverlay AuthContext ConfigLoader SuspendWatcher SystemVolumeWatcher; do
         test -f $out/share/qlock/components/$f.qml
       done

@@ -55,18 +55,19 @@ in {
           volume = lib.mkOption {
             type = lib.types.numbers.between 0 100;
             default = 20;
-            description = "Background audio on the human 0-100 scale (20 = 20%). Values ≤ 1 keep legacy 0-1 meaning.";
+            description = "Background audio as an absolute percentage of full-scale output (20 = 20%, identical in lock and preview). Values ≤ 1 keep legacy 0-1 meaning.";
           };
           pinSink = lib.mkOption {
             type = lib.types.bool;
             default = true;
             description = ''
               Anchor the default sink at its lock-time level while locked
-              (saving and restoring the user's volume/mute on unlock) so bg
-              loudness is exactly `volume`, immune to volume buttons. The sink
-              can only ever be returned to the anchor, never raised above it.
-              Disable for plain sink-relative playback with cubic compensation
-              only.
+              (saving and restoring the user's volume/mute on unlock), immune
+              to volume buttons. The anchor only constrains the mixer; it does
+              not scale `volume`, so the lock sounds exactly like the preview.
+              The sink can only ever be returned to the anchor, never raised
+              above it. Disable for plain sink-relative playback with cubic
+              compensation only.
             '';
           };
           showTitle = lib.mkOption {

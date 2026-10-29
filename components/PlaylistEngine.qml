@@ -518,12 +518,46 @@ Item {
     }
 
     function _onCountChanged() {
+        // Files can appear AFTER the initial scan reported an empty folder
+        // (download finishes, USB mount). Without retrying the initial pick
+        // the lock stays on the "No videos found" card until re-lock.
+        if (!root._initialPicked) {
+            root._maybePickInitial();
+            return;
+        }
+        // Library became empty mid-session (USB unplug, files deleted):
+        // clear the URL so VideoBackground stops the old video instead of
+        // playing a deleted file behind the "No videos found" card. A later
+        // scan that finds files again goes through the initial-pick path.
+        if (folderModel.count === 0) {
+            if (root._initialPicked) {
+                root._initialPicked = false;
+                root._shuffleBag = [];
+                root._shuffleIndex = 0;
+                root._lastFileName = "";
+                internal.currentUrl = "";
+                internal.currentFileName = "";
+            }
+            return;
+        }
         // Library changed mid-session (USB pull, download finish):
         // keep playing current, append genuinely new files to the tail.
         // No full reshuffle → no repeat, no visible hitch.
-        if (!root._initialPicked || folderModel.count === 0) return;
         root._prunePlayed();
-        if (root.mode !== "random") return;
+        if (root.mode === "fixed") {
+            // Fixed file deleted/replaced while locked: fall back to the
+            // resolver instead of leaving a dead URL on screen.
+            if (internal.currentFileName
+                    && root._indexOfFileName(internal.currentFileName) < 0) {
+                const idx = root._resolveFixedIndex();
+                const url = root._urlAt(idx);
+                if (url) {
+                    internal.currentUrl = url;
+                    internal.currentFileName = root._fileNameAt(idx);
+                }
+            }
+            return;
+        }
         const cur = internal.currentFileName;
         if (cur && root._indexOfFileName(cur) < 0) {
             // Current file deleted: jump to next healthy immediately.

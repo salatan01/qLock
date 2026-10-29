@@ -24,6 +24,14 @@ Item {
 
     signal authSucceeded()
     signal authFailed()
+    // An in-flight attempt was canceled by the environment (suspend), not
+    // by a wrong password. Overlays clear the typed buffer without shake.
+    signal authCanceled()
+
+    // Injectable PAM backend: production uses the child PamContext below;
+    // tests swap in a fake. Every backend access goes through this object so
+    // the attempt state machine stays testable without real PAM prompts.
+    property var pamBackend: pam
 
     property bool authenticating: false
     property bool showError: false
@@ -40,6 +48,41 @@ Item {
         return !root.authenticating && !root.coolingDown && !root.lockedOut;
     }
 
+    // ---- PAM backend boundary -------------------------------------------------
+    // Kept behind functions so a fake backend can be injected by tests and so
+    // every call site shares the same null/guards.
+    function _pamStart() {
+        if (!root.pamBackend) return false;
+        return root.pamBackend.start() === true;
+    }
+    function _pamRespond(password) {
+        if (root.pamBackend) root.pamBackend.respond(password);
+    }
+    function _pamAbort() {
+        if (root.pamBackend) root.pamBackend.abort();
+    }
+    function _pamResponseRequired() {
+        return !!(root.pamBackend && root.pamBackend.responseRequired);
+    }
+    function _pamMessageIsError() {
+        return !!(root.pamBackend && root.pamBackend.messageIsError);
+    }
+    function _pamMessageText() {
+        return root.pamBackend ? String(root.pamBackend.message || "") : "";
+    }
+
+    // One password, one response. Clearing the buffer BEFORE respond() is
+    // deliberate: respond() can synchronously emit another prompt/message,
+    // and either handler must then see an empty buffer instead of sending "".
+    function _respondPending() {
+        if (!root.authenticating) return;
+        if (!root._pamResponseRequired()) return;
+        if (root.pendingPassword.length === 0) return;
+        const password = root.pendingPassword;
+        root.pendingPassword = "";
+        root._pamRespond(password);
+    }
+
     // Password is passed in by the calling surface so this object never
     // touches UI. Empty passwords are rejected by the overlay already, but
     // guard here too — concurrent surfaces must not start PAM with "".
@@ -52,19 +95,22 @@ Item {
         root.statusText = "";
         // Safety net: if PAM never answers, unstick after 12s.
         pamTimeout.restart();
-        if (!pam.start()) {
-            pamTimeout.stop();
-            root.pendingPassword = "";
-            root.authenticating = false;
-            root.handleFailure();
+        if (!root._pamStart()) {
+            // The backend may have synchronously reported an error (which
+            // already closed the attempt); only count it here if still open.
+            if (root.authenticating) root._finishFailure();
             return;
         }
-        // NOTE: the password is sent in onResponseRequiredChanged when PAM
-        // actually prompts. Responding immediately after start() races the
-        // prompt and the reply gets dropped → stuck forever.
+        // A synchronous completion/error may already have closed the attempt.
+        if (!root.authenticating) pamTimeout.stop();
     }
 
-    function handleFailure() {
+    // Terminal transition with NO active-attempt guard: callers that need to
+    // close the gate before aborting (timeout) still need to count the
+    // failure. All signal/async paths go through handleFailure(), which does
+    // guard.
+    function _finishFailure() {
+        pamTimeout.stop();
         root.authenticating = false;
         root.pendingPassword = "";
         root.failCount += 1;
@@ -82,7 +128,14 @@ Item {
         root.authFailed();
     }
 
-    function handleSuccess() {
+    function handleFailure() {
+        // Late PAM completion/error after timeout/abort/another attempt must
+        // not increment the fail counter a second time.
+        if (!root.authenticating) return;
+        root._finishFailure();
+    }
+
+    function _finishSuccess() {
         pamTimeout.stop();
         root.authenticating = false;
         root.pendingPassword = "";
@@ -93,6 +146,70 @@ Item {
         lockoutTimer.stop();
         lockoutTick.stop();
         root.authSucceeded();
+    }
+
+    function handleSuccess() {
+        // A late success (after the 12s timeout closed the attempt) must
+        // never unlock. Only the currently active attempt may succeed.
+        if (!root.authenticating) return;
+        root._finishSuccess();
+    }
+
+    function _onPamTimeout() {
+        if (!root.authenticating) return;
+        // Close the gate BEFORE abort(): abort() can synchronously emit
+        // completed/error, which would otherwise double-count this failure.
+        root.authenticating = false;
+        root.pendingPassword = "";
+        root._pamAbort();
+        root.statusText = "Authentication timed out — try again";
+        root._finishFailure();
+    }
+
+    // Suspend / teardown while a password is in flight: close the attempt
+    // without counting a failure (the password was never judged). Aborting
+    // matters: a PAM helper stuck across sleep could otherwise complete
+    // later and unlock, and the next attempt would be blocked by the
+    // authenticating guard. Quickshell's abort() SIGKILLs the conversation,
+    // so no late completion can race this transition.
+    function cancelPending(reason) {
+        if (!root.authenticating) return;
+        // Close the gate BEFORE abort() — abort() can emit synchronously.
+        root.authenticating = false;
+        root.pendingPassword = "";
+        pamTimeout.stop();
+        root._pamAbort();
+        root.statusText = reason || "Authentication canceled — try again";
+        root.authCanceled();
+    }
+
+    function _onPamResponseRequired() {
+        root._respondPending();
+    }
+
+    function _onPamMessage() {
+        if (!root.authenticating) return;
+        if (root._pamResponseRequired() && root.pendingPassword.length > 0) {
+            root._respondPending();
+        } else if (root._pamMessageIsError()) {
+            const msg = root._pamMessageText();
+            if (msg.length > 0) root.statusText = msg;
+        }
+    }
+
+    function _onPamError() {
+        // PAM backend error: onCompleted may never fire, unstick here.
+        if (!root.authenticating) return;
+        root.statusText = "Authentication unavailable — try again";
+        root.handleFailure();
+    }
+
+    function _onPamCompleted(result) {
+        // Ignore completions from an attempt that timeout/abort already
+        // closed. This is the double-failure / late-success guard.
+        if (!root.authenticating) return;
+        if (result === PamResult.Success) root.handleSuccess();
+        else root.handleFailure();
     }
 
     // Called by overlays when the user types: clears stale error/status so
@@ -137,14 +254,7 @@ Item {
         id: pamTimeout
         interval: 12000
         repeat: false
-        onTriggered: {
-            if (!root.authenticating) return;
-            pam.abort();
-            root.pendingPassword = "";
-            root.authenticating = false;
-            root.statusText = "Authentication timed out — try again";
-            root.handleFailure();
-        }
+        onTriggered: root._onPamTimeout()
     }
 
     Timer {
@@ -159,39 +269,20 @@ Item {
     // prompt; the reply is dropped, onCompleted never fires, and the UI
     // sticks on "Authenticating…" even for the right password (plus the
     // authenticating guard then blocks all retries).
+    //
+    // Signals are routed through Connections (not attached handlers) so the
+    // same state machine can be driven by an injected test backend.
     PamContext {
         id: pam
         config: "login"
-        onResponseRequiredChanged: {
-            if (pam.responseRequired && root.authenticating) {
-                pam.respond(root.pendingPassword);
-                root.pendingPassword = "";
-            }
-        }
-        onPamMessage: {
-            if (pam.responseRequired && root.authenticating) {
-                pam.respond(root.pendingPassword);
-                root.pendingPassword = "";
-            } else if (pam.messageIsError) {
-                root.statusText = pam.message;
-            }
-        }
-        onError: {
-            // PAM backend error: onCompleted may never fire, unstick here.
-            pamTimeout.stop();
-            root.pendingPassword = "";
-            if (root.authenticating) {
-                root.statusText = "Authentication unavailable — try again";
-                root.handleFailure();
-            }
-        }
-        onCompleted: (result) => {
-            pamTimeout.stop();
-            if (result === PamResult.Success) {
-                root.handleSuccess();
-            } else {
-                root.handleFailure();
-            }
-        }
+    }
+
+    Connections {
+        target: root.pamBackend
+        ignoreUnknownSignals: true
+        function onResponseRequiredChanged() { root._onPamResponseRequired() }
+        function onPamMessage() { root._onPamMessage() }
+        function onError() { root._onPamError() }
+        function onCompleted(result) { root._onPamCompleted(result) }
     }
 }

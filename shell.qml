@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 import Quickshell.Io
@@ -111,12 +113,22 @@ ShellRoot {
 
     SystemVolumeWatcher {
         id: sysVol
-        // Force the sink to `volume` while locked so bg loudness is exactly
-        // the configured value, immune to volume buttons; pre-lock comes
-        // back on unlock. `!== false` keeps pinning on for legacy configs
-        // lacking the key. Preview (test.qml) never pins.
+        // Anchor the sink at its lock-time level while locked. The configured
+        // `volume` is an absolute fraction (lock == preview); this anchor only
+        // keeps background audio at the user's normal mixer level and
+        // neutralizes volume buttons. `!== false` keeps pinning on for legacy
+        // configs lacking the key. Preview (test.qml) never pins.
         pinned: cfg.config.pinSink !== false
-        volumeConfig: cfg.config.volume
+        suspended: suspendWatcher.suspended
+    }
+
+    Connections {
+        target: suspendWatcher
+        function onSuspendedChanged() {
+            // Do not leave a PAM helper in flight across sleep: it may block,
+            // complete late, or keep the authenticating guard set on resume.
+            if (suspendWatcher.suspended) authCtx.cancelPending()
+        }
     }
 
     PlaylistEngine {
@@ -133,6 +145,7 @@ ShellRoot {
         locked: true
 
         WlSessionLockSurface {
+            id: lockSurface
             color: "black"
 
             VideoBackground {
@@ -141,13 +154,23 @@ ShellRoot {
                 z: 0
                 source: playlist.currentVideoUrl
                 volume: cfg.config.volume
+                // The surface is cloned per monitor, so every screen has its
+                // own MediaPlayer. Keep audio on exactly one of them; N
+                // audible copies would mix louder/out of phase. Fall back to
+                // unmuted when the screen list is not ready (never silence
+                // the lock by accident).
+                audioMuted: {
+                    const screens = Quickshell.screens
+                    if (!screens || screens.length < 2 || !lockSurface.screen) return false
+                    return lockSurface.screen.name !== screens[0].name
+                }
                 sinkVolume: sysVol.sinkVolume
                 sinkMuted: sysVol.sinkMuted
                 pinActive: sysVol.pinActive
-                pinLevel: sysVol.pinLevel
                 pinMuted: sysVol.pinMuted
                 silenced: sysVol.streamSilenced
                 suspended: suspendWatcher.suspended
+                resumeCount: suspendWatcher.resumeCount
                 loop: cfg.config.repeat !== false
                 // Fixed mode advances nowhere, so it loops forever in-player
                 // (no EndOfMedia, no reload flicker). Random mode replays
@@ -155,14 +178,37 @@ ShellRoot {
                 // playback=2 is "2playback", 3 is "3playback", 0 is forever.
                 playCount: cfg.config.mode === "fixed" ? 0 : cfg.effectivePlayCount()
                 debug: cfg.debug
-                onEnded: {
-                    if (playlist.mode === "fixed") bgVideo.restart()
-                    else playlist.next()
+                onEnded: (endedUrl) => {
+                    if (playlist.mode === "fixed") {
+                        bgVideo.restart()
+                        return
+                    }
+                    // Every monitor has its own cloned MediaPlayer. Only the
+                    // surface whose finished URL is still current may advance
+                    // the shared playlist; the others just reload the new URL.
+                    if (endedUrl.length > 0 && playlist.currentVideoUrl !== endedUrl) return
+                    const previous = playlist.currentVideoUrl
+                    playlist.next()
+                    // A single-video library (or an exhausted cycle) can
+                    // resolve back to the same URL. The source binding then
+                    // never changes, so the player would sit at EndOfMedia
+                    // forever. Restart it in place; callLater keeps the
+                    // stop/play out of the media-status signal frame.
+                    if (previous.length > 0 && playlist.currentVideoUrl === previous) {
+                        Qt.callLater(function() {
+                            if (playlist.currentVideoUrl === previous) bgVideo.restart()
+                        })
+                    }
                 }
                 // Corrupt file: gapless jump, no stall. Fixed mode has
                 // nowhere to jump — stay put (error guard dedups, no spin).
-                onFailed: {
-                    if (playlist.mode !== "fixed") playlist.skipFailed()
+                // Ignore a late failure from a track another monitor already
+                // advanced past; without this the shared playlist would
+                // skip a healthy new track.
+                onFailed: (reason, failedUrl) => {
+                    if (playlist.mode === "fixed") return
+                    if (failedUrl.length > 0 && playlist.currentVideoUrl !== failedUrl) return
+                    playlist.skipFailed()
                 }
             }
 
@@ -240,6 +286,7 @@ ShellRoot {
             AuthOverlay {
                 z: 3
                 authContext: authCtx
+                resumeCount: suspendWatcher.resumeCount
                 // Mouse-free lock: keyboard only (Enter reveals, Esc hides).
                 // All MouseAreas inside go dead.
                 mouseEnabled: false

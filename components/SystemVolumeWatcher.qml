@@ -13,15 +13,18 @@ import Quickshell.Io
 //    verified against pactl). Compensation must divide by sink^3, not
 //    sink — linear math audibly under-compensates.
 //
-// 2) PIN (only when `pinned`, i.e. the real lock surface): save the
-//    pre-lock sink, force the sink to the configured `volume` for the whole
-//    session, re-asserting if anything (volume buttons, other agents) moves
-//    it. On restore (unlock), the pre-lock volume+mute come back via
-//    one-shot _setSink + supervisor EXIT trap — no loop, so nothing keeps
-//    enforcing after the process exits. If the session was muted at lock
-//    time it stays silent (mute preserved, never blasted). Forcing to the
-//    config value (not anchoring at lock-time) is the whole point: `volume:
-//    20` must sound like 20% while locked, then hand 90% back on unlock.
+// 2) PIN (only when `pinned`, i.e. the real lock surface): hold the sink
+//    at the LOCK-TIME level for the whole session, re-asserting if anything
+//    (volume buttons, other agents) moves it. Anchoring — not pinning to
+//    1.0 — is load-bearing for safety: it never raises the mixer above the
+//    pre-lock level, so blasting is structurally impossible. The configured
+//    `volume` is an ABSOLUTE fraction of full scale (VideoBackground divides
+//    out sink^3); it is NOT relative to this anchor. This makes the lock
+//    exactly as loud as the preview at the same `volume` (the old
+//    anchor-relative math made `volume: 5` nearly inaudible). Buttons are
+//    neutralized by snapping the sink back within a few hundred ms.
+//    Mute state at lock time is preserved too (lock muted -> stays silent).
+//    On restore, pre-lock volume+mute come back.
 //    Crash safety: pre-pin state is also mirrored to
 //    $XDG_RUNTIME_DIR/qlock-volpin so the `qlock` wrapper's EXIT trap can
 //    restore it even if quickshell dies (no in-process language — QML,
@@ -39,24 +42,20 @@ Item {
     property bool sinkMuted: false
     property bool available: false
     property int pollIntervalMs: 1000
+    // Pause polling across suspend: wpctl/dbus can block while the session
+    // is frozen, and a subprocess that outlives sleep may never return.
+    property bool suspended: false
+    // Tests set this false to avoid spawning wpctl.
+    property bool pollEnabled: true
+    // wpctl should answer in <100ms. If it is still running after this long
+    // it is hung (daemon blocked across resume, etc.); kill and retry.
+    readonly property int pollHungMs: 5000
 
-    // Pinning (lock surface only). pinLevel is the CONFIGURED target
-    // (normalized `volumeConfig`), NOT the lock-time level: while locked
-    // the sink IS the config value (verifiable via `wpctl get-volume`),
-    // then pre-lock comes back on unlock.
+    // Pinning (lock surface only). pinLevel is the SINK ANCHOR: captured
+    // from the live sink at engage time. It is deliberately NOT part of the
+    // stream-volume math (see VideoBackground.effectiveVolume).
     property bool pinned: false
     property real pinLevel: 1.0
-    // Raw config value (0-100 human scale, <=1 legacy fraction), bound by
-    // the shell to cfg.config.volume. Normalized to targetSink below.
-    property real volumeConfig: 20
-    // Normalized 0-1 sink target. Same scale as VideoBackground.targetVolume.
-    // Clamped to 0-1 (never overdrive 1.5: config 100 = full, never blast).
-    readonly property real targetSink: {
-        var v = Number(root.volumeConfig);
-        if (isNaN(v)) return 0.2;
-        if (v <= 1.0) return Math.max(0, Math.min(1, v));
-        return Math.max(0, Math.min(1, v / 100.0));
-    }
     readonly property bool pinActive: root._pinActive
     // Mute captured at lock time. VideoBackground forces stream 0 while
     // this is true (muted lock stays silent even if sink is unmuted
@@ -67,20 +66,24 @@ Item {
     // (e.g. 0.20 -> 0.60) but QML only learns the sink via polling —
     // without this, full stream (1.0) hits the loud sink for ~100-200ms =
     // an explosive blast right before exit. Synchronous flag -> stream 0
-    // instantly, polls can't re-raise it. Never reset: process exits ~1.2s
-    // after restore anyway.
+    // instantly, polls can't re-raise it. Unlock always wins over a later
+    // config disengage (`_unlocking` below), so a lingering process cannot
+    // be un-silenced by restore(false).
     property bool streamSilenced: false
+    // Latched by the first restore(true) (unlock). restore(false) is only
+    // allowed to make the stream audible before an unlock has started.
+    property bool _unlocking: false
     // _wantPin starts true so the first live reading engages even if the
     // initial `pinned` binding never emits a change; _engagePin itself
     // re-checks `pinned`, so a pinSink:false config can never engage.
     property bool _wantPin: true
-    // _pinActive means the sink is being held at pinLevel (config value)
-    // and the STREAM compensates live sink moves (see VideoBackground) so
-    // bg never follows buttons, even in the poll window before the sink is
+    // _pinActive means the sink is being held at pinLevel (lock-time anchor)
+    // and the STREAM compensates transient sink moves (see VideoBackground)
+    // so bg never follows buttons, even in the poll window before the sink is
     // snapped back. _enforcing fights the SINK back to pinLevel. restore()
     // stops the fight, restores pre-lock, but leaves _pinActive true through
-    // the 800ms fade so the stream math stays stable (live == restored sink
-    // gives a quiet fade, never a blast). The process exits right after.
+    // the fade so the stream math stays stable (live == restored sink gives a
+    // quiet fade, never a blast). The process exits right after.
     property bool _pinActive: false
     property bool _enforcing: false
     property real _savedVolume: 1.0
@@ -116,21 +119,23 @@ Item {
         if (!root.pinned) return;
         // Fresh lock: clear any previous session's terminal state (restore()
         // never resets these — the process normally exits right after).
-        root.streamSilenced = false;
+        if (!root._unlocking) root.streamSilenced = false;
         root._restorePhase = 0;
-        // Save pre-lock first — this is what restore() hands back.
+        // Save pre-lock first — this is both the anchor and what restore()
+        // hands back.
         root._savedVolume = root.sinkVolume;
         root._savedMuted = root.sinkMuted;
         root._haveSaved = true;
-        // Force target: sink becomes the configured volume. Mute preserved:
-        // a muted session stays silent (enforced muted, stream 0).
-        root.pinLevel = root.targetSink;
+        // Anchor: hold exactly what the user had. The sink can only ever be
+        // returned here, never raised above it. The configured `volume` is
+        // an absolute stream fraction (VideoBackground compensates sink^3),
+        // not a fraction of this anchor.
+        root.pinLevel = Math.max(0, Math.min(1.5, root._savedVolume));
         root._pinActive = true;
         root._enforcing = true;
         root._writeSaveFile();
-        console.log("qLock: saved sink " + root._savedVolume.toFixed(2) + (root._savedMuted ? " [MUTED]" : "")
-            + ", forcing sink to " + root.pinLevel.toFixed(2) + (root._savedMuted ? " [staying MUTED]" : ""));
-        root._setSink(root.pinLevel, root._savedMuted);
+        console.log("qLock: anchored sink at " + root.pinLevel.toFixed(2) + (root._savedMuted ? " [staying MUTED]" : ""));
+        root._enforcePin();
     }
 
     function _enforcePin() {
@@ -153,8 +158,17 @@ Item {
     // over even if Qt.quit() stalls and the process lingers — volume keys
     // work again immediately, poll drops back to 1s. streamSilenced stays
     // true so a lingering process stays silent.
-    function restore() {
-        root.streamSilenced = true;
+    //
+    // silenceStream=false is for CONFIG-DISENGAGE while still locked
+    // (pinSink switched off): the mixer is restored but the video must keep
+    // playing audibly, so the lock does not go silent for the rest of the
+    // session. Unlock always uses the default (true).
+    function restore(silenceStream) {
+        if (silenceStream === undefined) silenceStream = true;
+        // Unlock silences forever once started; config disengage may only
+        // un-silence before that point.
+        if (silenceStream) root._unlocking = true;
+        root.streamSilenced = root._unlocking || silenceStream;
         root._wantPin = false;
         root._enforcing = false;
         if (!root._pinActive && !root._haveSaved) return;
@@ -274,24 +288,30 @@ Item {
             root._wantPin = true;
             if (root.available) root._engagePin();
         } else {
-            root.restore();
+            // Disengaging the config while locked is not an unlock: restore
+            // the mixer but keep the video audible. Calling restore() here
+            // used to set streamSilenced permanently, muting the whole lock.
+            root.restore(false);
         }
     }
 
-    // Config arrives async (XHR) — engage may have used the built-in default
-    // (20). If the real config differs, retarget mid-lock: update pinLevel
-    // and force the sink to the true target immediately.
-    onTargetSinkChanged: {
-        if (root._pinActive && root._enforcing && root.pinned) {
-            if (Math.abs(root.pinLevel - root.targetSink) > 0.005) {
-                console.log("qLock: retargeting sink", root.pinLevel.toFixed(2), "->", root.targetSink.toFixed(2));
-                root.pinLevel = root.targetSink;
-                root._setSink(root.pinLevel, root._savedMuted);
-            }
-        } else if (!root._pinActive && root._wantPin && root.pinned && root.available) {
-            root._engagePin();
+    onSuspendedChanged: {
+        if (root.suspended) {
+            // Do not let a hung wpctl survive the sleep and block the poller
+            // forever. It is restarted on resume.
+            root._pollHungWarned = false;
+            root._pollStartWallMs = 0;
+            if (poller.running) poller.running = false;
+        } else {
+            root._pollStartWallMs = 0;
+            root._pollHungWarned = false;
         }
     }
+
+    // No config retargeting is needed: the sink is anchored at the first
+    // reliable lock-time reading, while VideoBackground reads cfg.volume
+    // directly for the absolute stream fraction. A late config update
+    // therefore only changes the stream fraction, never the mixer anchor.
 
     Process {
         id: poller
@@ -302,9 +322,32 @@ Item {
         }
 
         onExited: (exitCode, exitStatus) => {
+            root._pollStartWallMs = 0;
             if (exitCode !== 0 && !root.available) {
                 console.warn("qLock: wpctl unavailable (code", exitCode, ") — loudness lock disabled, volume stays relative to system mixer");
             }
+        }
+    }
+
+    property real _pollStartWallMs: 0
+    property bool _pollHungWarned: false
+
+    // Independent of the poll timer so it keeps watching a slow/hung child.
+    Timer {
+        id: pollGuard
+        interval: root.pollHungMs
+        repeat: true
+        running: root.pollEnabled && !root.suspended
+        onTriggered: {
+            if (!poller.running || root._pollStartWallMs <= 0) return;
+            if (Date.now() - root._pollStartWallMs < root.pollHungMs) return;
+            if (!root._pollHungWarned) {
+                root._pollHungWarned = true;
+                console.warn("qLock: wpctl get-volume hung for",
+                    Math.round((Date.now() - root._pollStartWallMs) / 1000) + "s — killing it");
+            }
+            root._pollStartWallMs = 0;
+            poller.running = false;
         }
     }
 
@@ -358,17 +401,21 @@ Item {
 
     Timer {
         id: pollTimer
-        // Sense faster while holding the forced level so button fights end
-        // quickly. 100ms + instant stream compensation (VideoBackground
-        // ratio math) = bg never audibly follows buttons; sink snaps back
-        // right after. Unlock fade is separately hard-silenced (streamSilenced)
-        // so the async restore can't blast regardless of poll timing.
-        interval: root._pinActive ? 100 : root.pollIntervalMs
+        // 5 Hz while holding the anchor: fast enough that volume-button
+        // fights settle quickly, without the old 10 Hz subprocess churn.
+        // VideoBackground's instant stream compensation covers the poll
+        // window; the sink snaps back on the next reading. Unlock fade is
+        // separately hard-silenced (streamSilenced) so the async restore
+        // can't blast regardless of poll timing.
+        interval: root._pinActive ? 200 : root.pollIntervalMs
         repeat: true
-        running: true
+        running: root.pollEnabled && !root.suspended
         triggeredOnStart: true
         onTriggered: {
-            if (!poller.running) poller.running = true;
+            if (poller.running) return;
+            root._pollStartWallMs = Date.now();
+            root._pollHungWarned = false;
+            poller.running = true;
         }
     }
 }

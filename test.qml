@@ -1,3 +1,5 @@
+pragma ComponentBehavior: Bound
+
 import QtQuick
 import Quickshell
 
@@ -24,6 +26,14 @@ ShellRoot {
 
     SystemVolumeWatcher {
         id: sysVol
+        suspended: suspendWatcher.suspended
+    }
+
+    Connections {
+        target: suspendWatcher
+        function onSuspendedChanged() {
+            if (suspendWatcher.suspended) authCtx.cancelPending()
+        }
     }
 
     PlaylistEngine {
@@ -71,19 +81,31 @@ ShellRoot {
             sinkVolume: sysVol.sinkVolume
             sinkMuted: sysVol.sinkMuted
             pinActive: sysVol.pinActive
-            pinLevel: sysVol.pinLevel
             pinMuted: sysVol.pinMuted
             silenced: sysVol.streamSilenced
             suspended: suspendWatcher.suspended
+            resumeCount: suspendWatcher.resumeCount
             loop: cfg.config.repeat !== false
             playCount: cfg.config.mode === "fixed" ? 0 : cfg.effectivePlayCount()
             debug: cfg.debug
-            onEnded: {
-                if (playlist.mode === "fixed") previewVideo.restart()
-                else playlist.next()
+            onEnded: (endedUrl) => {
+                if (playlist.mode === "fixed") {
+                    previewVideo.restart()
+                    return
+                }
+                if (endedUrl.length > 0 && playlist.currentVideoUrl !== endedUrl) return
+                const previous = playlist.currentVideoUrl
+                playlist.next()
+                if (previous.length > 0 && playlist.currentVideoUrl === previous) {
+                    Qt.callLater(function() {
+                        if (playlist.currentVideoUrl === previous) previewVideo.restart()
+                    })
+                }
             }
-            onFailed: {
-                if (playlist.mode !== "fixed") playlist.skipFailed()
+            onFailed: (reason, failedUrl) => {
+                if (playlist.mode === "fixed") return
+                if (failedUrl.length > 0 && playlist.currentVideoUrl !== failedUrl) return
+                playlist.skipFailed()
             }
         }
 
@@ -139,6 +161,7 @@ ShellRoot {
             id: previewAuth
             z: 5
             authContext: authCtx
+            resumeCount: suspendWatcher.resumeCount
             // QLOCK_PREVIEW_MOUSE=0 previews the mouse-free lock build:
             // keyboard only (Enter reveals, Esc hides). Quit via
             // successful auth (real PAM) or kill the process.

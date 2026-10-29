@@ -14,7 +14,9 @@ lock, and a now-playing title pill.
 - **Loudness-locked audio** — background volume sounds exactly as configured,
   immune to volume buttons; pre-lock mixer state restored on unlock,
   crash-safe.
-- **Suspend-aware** — playback pauses across sleep/resume via logind hook.
+- **Suspend-aware** — playback pauses across sleep/resume via logind hook,
+  with a wall-clock watchdog and playback-progress recovery for missed
+  edges and frozen decoders.
 - **Now-playing pill** — bottom-center title of the current video, toggleable.
 
 ## Requirements
@@ -74,7 +76,7 @@ package explicitly —
     videoDirectory = "~/Videos/lockscreen";
     mode = "random";   # or "fixed" (+ fixedFile)
     playback = 0;      # 0 = loop forever, 2 = 2playback, …
-    volume = 20;       # 0-100 scale
+    volume = 20;       # 0-100, absolute % of full scale
     pinSink = true;
     showTitle = true;
   };
@@ -223,28 +225,34 @@ fall back to infinite loop with a warning.
 
 ### `volume` (number 0–100, default `20`)
 
-Background audio loudness on a human scale: `20` = 20%. Values `≤ 1` keep
-the legacy 0–1 fraction meaning so old configs don't go silent. This is
-**loudness-locked, not mixer-relative** (see `pinSink`): `20` always sounds
-like 20% did for you. Set `QLOCK_DEBUG=1` for per-change volume logging.
+Background audio loudness as an **absolute** fraction of full scale:
+`20` = 20% linear output, in both the real lock and the preview. Values `≤ 1`
+keep the legacy 0–1 fraction meaning so old configs don't go silent. Qt applies
+the stream gain before the PipeWire sink's cubic curve, so qLock divides the
+sink gain (`sink³`) back out; this is why `5` is quiet-but-audible rather than
+muted, and why the lock sounds exactly like the preview at the same setting.
+If the sink is very low, Qt's per-stream `1.0` cap can make the result quieter
+than requested (the lock and preview still match; raise the sink for more).
+This is **loudness-locked against later mixer changes** (see `pinSink`): volume
+buttons cannot change what you hear while locked. Set `QLOCK_DEBUG=1` for
+per-change volume logging.
 
 ### `pinSink` (bool, default `true`)
 
 While locked, the default sink is **anchored at its lock-time level** — your
-pre-lock volume/mute is saved, held for the session, and restored on
-unlock, so background loudness is exactly `volume` and volume buttons get
-snapped back within ~0.5s. Deliberately anchored, NOT pinned to full scale:
-pinning to full would redefine 20 as 20%-of-full-scale, ~13 dB hotter than
-a 35%-sink user's norm. The sink can only ever be returned to the anchor,
-never raised above it, so blasting is structurally impossible; a lock taken
-while muted stays silent.
+pre-lock volume/mute is saved, held for the session, and restored on unlock,
+so volume buttons get snapped back within ~0.5s. The anchor is **mixer-only**:
+it does not scale the configured `volume` (that would make a 50% sink lock
+~18 dB quieter than the preview, which is the old muted-at-5 bug). The sink
+can only ever be returned to the anchor, never raised above it, so blasting is
+structurally impossible; a lock taken while muted stays silent.
 
 Crash safety: the pre-pin state is mirrored to
 `$XDG_RUNTIME_DIR/qlock-volpin`, and the `qlock` supervisor binary restores
 it via trap even if quickshell dies (only SIGKILL to the supervisor itself
 is unrecoverable — true in any language; stale leftovers are deleted, never
 restored over your live mixer). Stream gain additionally compensates the
-PipeWire cubic curve (`gain = slider³`) during transitions and in preview.
+PipeWire cubic curve (`gain = slider³`) in both lock and preview.
 Set `false` for plain sink-relative playback. The preview never pins.
 
 ### `showTitle` (bool, default `true`)
@@ -274,6 +282,9 @@ only once you create it.
 
 - One shared auth context for all monitors: multi-screen setups run a single
   PAM session and a single fail counter, never competing logins.
+- One lock supervisor per user: an advisory `flock` guard in the `qlock`
+  wrapper refuses a second instance (concurrent lock surfaces would both keep
+  fighting over the session lock and the mixer).
 - Correct PAM sequencing (respond only on prompt), 12s hang safety net,
   2s cooldown / 30s lockout throttling, no Caps Lock surprises.
 - Unlock commits to the compositor before the process exits; mixer restore
@@ -293,6 +304,7 @@ only once you create it.
 | `dbus-monitor exited` warning | Suspend hook restarting in 3s — harmless unless suspend-pause stops working |
 | Same video never replays / want repeats again | Long-memory shuffle is doing its job — run `qlock clear-cache` to reset history |
 | `history corrupt, starting fresh` warning | History JSON was hand-edited or truncated — deleted entry ignored, fresh cycle started |
+| `qlock: already running` on launch | Another qLock supervisor holds the single-instance lock — exit normally; wait for the existing lock to unlock |
 
 ## Environment knobs
 
@@ -310,7 +322,16 @@ nix run .#preview
 QLOCK_PREVIEW_MOUSE=0 nix run .#preview  # mouse-free rehearsal
 nix flake check
 nix build .#qlock
+
+# Tests
+QT_QPA_PLATFORM=offscreen qmltestrunner -input tests/tst_video.qml
+timeout 15 quickshell --path tests/harness.qml   # expect "qLock tests: ALL PASS"
 ```
+
+`tests/harness.qml` runs under Quickshell (not `qmltestrunner`) because
+`AuthContext`/`SuspendWatcher`/`AuthOverlay` import statically linked
+Quickshell plugins. It covers the PAM state machine, the overlay's error
+visibility, and the suspend/resume watchdog.
 
 Layout: `shell.qml` (production lock) · `test.qml` (safe preview) ·
 `components/` (`AuthOverlay`, `AuthContext`, `PlaylistEngine`,
